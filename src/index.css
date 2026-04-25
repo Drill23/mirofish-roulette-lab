@@ -1,0 +1,57 @@
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=Instrument+Sans:wght@400;500;600;700&display=swap');
+
+:root {
+  font-family: var(--font-body);
+  line-height: 1.5;
+  font-weight: 400;
+  color: #2e231a;
+  background: #f6efe7;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  --paper: #fcf7f0;
+  --ink: #2f241b;
+  --muted: rgba(47, 36, 27, 0.58);
+  --font-display: 'Cormorant Garamond', serif;
+  --font-body: 'Instrument Sans', sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: #f6efe7;
+  color: var(--ink);
+}
+
+body,
+button {
+  font-family: var(--font-body);
+}
+
+button {
+  cursor: pointer;
+}
+
+button,
+a,
+img {
+  -webkit-tap-highlight-color: transparent;
+}
+
+img {
+  max-width: 100%;
+}
+
+#root {
+  isolation: isolate;
+}
