@@ -60,6 +60,18 @@ const AGENTS = [
     predict: predictTinyLearner,
   },
   {
+    id: 'bayes',
+    name: 'Bayes wheel',
+    signal: 'prior por setores e recencia',
+    predict: predictBayesWheel,
+  },
+  {
+    id: 'mirror',
+    name: 'Mirror scout',
+    signal: 'padroes que repetem no espelho',
+    predict: predictMirrorScout,
+  },
+  {
     id: 'seed',
     name: 'Seed do print',
     signal: 'graficos iniciais da mesa',
@@ -115,6 +127,7 @@ function App() {
   )
   const lastTen = history.slice(-10).reverse()
   const paperSummary = summarizePaper(savedState.paperLog)
+  const lastOutcome = savedState.paperLog[0] ?? null
 
   function updateState(patch) {
     setSavedState((current) => ({ ...current, ...patch }))
@@ -216,6 +229,8 @@ function App() {
         </aside>
 
         <section className="control-panel">
+          {lastOutcome && <OutcomeBanner entry={lastOutcome} />}
+
           <div className="field-row">
             <label>
               Vizinhos
@@ -273,7 +288,7 @@ function App() {
           <div className="metric-strip">
             <Metric label="Historico" value={history.length} />
             <Metric label="Paper 10" value={`${Math.min(savedState.paperLog.length, 10)}/10`} />
-            <Metric label="Edge" value={formatSignedPercent(population.recommendation.edge)} />
+            <Metric label="ROI est." value={formatSignedPercent(population.recommendation.roiEstimate)} />
             <Metric label="Backtest" value={formatMoney(backtest.net)} />
           </div>
         </section>
@@ -328,6 +343,21 @@ function App() {
             </div>
 
             <div className="history-editor">
+              <div className="smart-card">
+                <div>
+                  <span>Modo inteligente</span>
+                  <strong>
+                    {population.recommendation.smartSpan} vizinhos / centro{' '}
+                    {population.recommendation.smartCenter}
+                  </strong>
+                </div>
+                <p>
+                  Consenso {formatPercent(population.recommendation.consensus)}. Quebra-even{' '}
+                  {formatPercent(population.recommendation.breakEven)}. Confiança{' '}
+                  {formatPercent(population.recommendation.confidence)}.
+                </p>
+              </div>
+
               <div className="section-title">
                 <span>Historico</span>
                 <div>
@@ -514,6 +544,10 @@ function App() {
                     <dt>Massa</dt>
                     <dd>{formatPercent(agent.mass)}</dd>
                   </div>
+                  <div>
+                    <dt>ROI</dt>
+                    <dd>{formatSignedPercent(agent.roiEstimate)}</dd>
+                  </div>
                 </dl>
               </article>
             ))}
@@ -548,12 +582,19 @@ function App() {
                 savedState.paperLog.slice(0, 10).map((entry) => (
                   <div className="paper-row" key={entry.id}>
                     <span className={entry.hit ? 'hit' : 'miss'}>
-                      {entry.action === 'bet' ? (entry.hit ? 'Ganhou' : 'Perdeu') : 'Observou'}
+                      {entry.action === 'bet'
+                        ? entry.hit
+                          ? 'Ganhou'
+                          : 'Perdeu'
+                        : entry.hit
+                          ? 'Teria ganho'
+                          : 'Teria perdido'}
                     </span>
                     <strong>
-                      {entry.center} / saiu {entry.actual}
+                      {entry.center} +{entry.span ?? Math.max((entry.covered.length - 1) / 2, 0)} / saiu{' '}
+                      {entry.actual}
                     </strong>
-                    <em>{formatMoney(entry.net)}</em>
+                    <em>{formatMoney(entry.action === 'bet' ? entry.net : (entry.wouldNet ?? entry.net))}</em>
                   </div>
                 ))
               ) : (
@@ -598,6 +639,34 @@ function Metric({ label, value }) {
     <div className="metric">
       <span>{label}</span>
       <strong>{value}</strong>
+    </div>
+  )
+}
+
+function OutcomeBanner({ entry }) {
+  const headline =
+    entry.action === 'bet'
+      ? entry.hit
+        ? 'Ganhou essa'
+        : 'Perdeu essa'
+      : entry.hit
+        ? 'Teria ganho'
+        : 'Teria perdido'
+  const tone = entry.hit ? 'outcome-banner--hit' : 'outcome-banner--miss'
+  const value = entry.action === 'bet' ? entry.net : (entry.wouldNet ?? entry.net)
+  const span = entry.span ?? Math.max((entry.covered.length - 1) / 2, 0)
+
+  return (
+    <div className={`outcome-banner ${tone}`}>
+      <div>
+        <span>Ultima rodada</span>
+        <strong>{headline}</strong>
+      </div>
+      <p>
+        Escolha {entry.center} +{span} cobria {entry.covered.length} numeros. Saiu{' '}
+        <b>{entry.actual}</b>. {entry.action === 'bet' ? 'Resultado' : 'Simulado'}:{' '}
+        <b>{formatMoney(value)}</b>.
+      </p>
     </div>
   )
 }
@@ -826,12 +895,14 @@ function buildPopulation(history, span, seedDistribution = null) {
     const probabilities = agent.predict(history, context)
     const center = findBestCenter(probabilities, span)
     const covered = getCoveredNumbers(center, span)
+    const mass = covered.reduce((sum, number) => sum + probabilities[number], 0)
     return {
       ...agent,
       probabilities,
       center,
       covered,
-      mass: covered.reduce((sum, number) => sum + probabilities[number], 0),
+      mass,
+      roiEstimate: estimateRoi(mass, covered.length),
       score: scores[agent.id],
     }
   })
@@ -849,19 +920,29 @@ function buildPopulation(history, span, seedDistribution = null) {
   const covered = getCoveredNumbers(center, span)
   const mass = covered.reduce((sum, number) => sum + stabilized[number], 0)
   const baseline = covered.length / NUMBER_COUNT
+  const breakEven = covered.length / 36
   const edge = mass - baseline
+  const roiEstimate = estimateRoi(mass, covered.length)
+  const entropyScore = 1 - entropy(stabilized) / Math.log(NUMBER_COUNT)
+  const consensus = calculateConsensus(agentRows, weights, covered)
+  const confidence = clamp(entropyScore * 1.25 + Math.max(edge, 0) * 2.2 + consensus * 0.35, 0, 1)
+  const smartCoverage = findSmartCoverage(stabilized)
   const leader = agentRows[weights.indexOf(Math.max(...weights))]
   const mode =
-    history.length < 10 || edge < 0.025 ? 'hold' : edge < 0.065 ? 'paper' : 'bet'
+    history.length < 10 || roiEstimate < 0.015 || confidence < 0.28
+      ? 'hold'
+      : roiEstimate < 0.08 || confidence < 0.52
+        ? 'paper'
+        : 'bet'
 
   const message =
     mode === 'bet'
-      ? `Populacao inclinada para ${leader.name}. Entrada pequena e registrada.`
+      ? `Populacao inclinada para ${leader.name}. Sinal acima do ponto de equilibrio.`
       : mode === 'paper'
-        ? `Sinal existe, mas ainda e paper. Lider: ${leader.name}.`
+        ? `Sinal existe, mas ainda e paper. Lider: ${leader.name}; confirme no teste.`
         : history.length < 10
           ? 'Carregue pelo menos 10 giros para os agentes acordarem.'
-          : 'Sem vantagem clara contra o aleatorio. Melhor observar.'
+          : 'Sem vantagem clara contra equilibrio e aleatorio. Melhor observar.'
 
   return {
     probabilities: stabilized,
@@ -869,6 +950,14 @@ function buildPopulation(history, span, seedDistribution = null) {
       center,
       covered,
       edge,
+      roiEstimate,
+      breakEven,
+      confidence,
+      consensus,
+      smartCenter: smartCoverage.center,
+      smartSpan: smartCoverage.span,
+      smartMass: smartCoverage.mass,
+      smartRoi: smartCoverage.roiEstimate,
       mass,
       mode,
       message,
@@ -944,16 +1033,21 @@ function runBacktest(history, span, unit, seedDistribution = null) {
 function settlePaperRound({ recommendation, actual, span, unit, historyLength }) {
   const action = historyLength >= 10 && recommendation.mode !== 'hold' ? 'bet' : 'observe'
   const covered = action === 'bet' ? recommendation.covered : getCoveredNumbers(recommendation.center, span)
-  const net = action === 'bet' ? settleRoulette(covered, actual, unit) : 0
+  const wouldNet = settleRoulette(covered, actual, unit)
+  const net = action === 'bet' ? wouldNet : 0
 
   return {
     id: `${Date.now()}-${actual}-${Math.random().toString(16).slice(2)}`,
     action,
     actual,
     center: recommendation.center,
+    span,
     covered,
     hit: covered.includes(actual),
     net,
+    wouldNet,
+    confidence: recommendation.confidence,
+    roiEstimate: recommendation.roiEstimate,
   }
 }
 
@@ -1066,6 +1160,56 @@ function predictTinyLearner(history) {
   return smoothOnWheel(blended, 0.55)
 }
 
+function predictBayesWheel(history) {
+  const scores = Array(NUMBER_COUNT).fill(1)
+  if (!history.length) {
+    return normalize(scores)
+  }
+
+  const recent = history.slice(-54)
+  const sectorHits = Array(WHEEL_ORDER.length).fill(0.2)
+  recent.forEach((number, index) => {
+    const position = WHEEL_ORDER.indexOf(number)
+    const ageBoost = 0.35 + (index + 1) / recent.length
+    for (let offset = -3; offset <= 3; offset += 1) {
+      const target = mod(position + offset, WHEEL_ORDER.length)
+      sectorHits[target] += ageBoost / (Math.abs(offset) + 1)
+    }
+  })
+
+  WHEEL_ORDER.forEach((number, position) => {
+    const direct = sectorHits[position]
+    const left = sectorHits[mod(position - 1, WHEEL_ORDER.length)]
+    const right = sectorHits[mod(position + 1, WHEEL_ORDER.length)]
+    scores[number] += direct * 1.4 + (left + right) * 0.35
+  })
+
+  return normalize(scores)
+}
+
+function predictMirrorScout(history) {
+  const scores = Array(NUMBER_COUNT).fill(0.25)
+  if (history.length < 4) {
+    return predictSector(history)
+  }
+
+  const last = history.at(-1)
+  const lastPosition = WHEEL_ORDER.indexOf(last)
+  const opposite = mod(lastPosition + Math.floor(WHEEL_ORDER.length / 2), WHEEL_ORDER.length)
+  const recent = history.slice(-24)
+
+  recent.forEach((number, index) => {
+    const position = WHEEL_ORDER.indexOf(number)
+    const mirrorPosition = mod(opposite + (position - lastPosition), WHEEL_ORDER.length)
+    const reflectedPosition = mod(opposite - (position - lastPosition), WHEEL_ORDER.length)
+    const weight = 0.5 + index / Math.max(recent.length, 1)
+    scores[WHEEL_ORDER[mirrorPosition]] += weight
+    scores[WHEEL_ORDER[reflectedPosition]] += weight * 0.75
+  })
+
+  return smoothOnWheel(scores, 0.7)
+}
+
 function predictSeed(_history, context = {}) {
   return context.seedDistribution ?? predictSkeptic()
 }
@@ -1087,6 +1231,52 @@ function findBestCenter(probabilities, span) {
   })
 
   return bestCenter
+}
+
+function findSmartCoverage(probabilities) {
+  let best = {
+    center: 0,
+    span: 0,
+    mass: probabilities[0],
+    roiEstimate: estimateRoi(probabilities[0], 1),
+    score: -Infinity,
+  }
+
+  for (let span = 0; span <= 9; span += 1) {
+    const center = findBestCenter(probabilities, span)
+    const covered = getCoveredNumbers(center, span)
+    const mass = covered.reduce((sum, number) => sum + probabilities[number], 0)
+    const roiEstimate = estimateRoi(mass, covered.length)
+    const baselineEdge = mass - covered.length / NUMBER_COUNT
+    const score = roiEstimate * 0.72 + baselineEdge * 2.1 - covered.length * 0.003
+
+    if (score > best.score) {
+      best = { center, span, mass, roiEstimate, score }
+    }
+  }
+
+  return best
+}
+
+function calculateConsensus(agentRows, weights, covered) {
+  return agentRows.reduce((sum, agent, index) => {
+    const agrees = covered.some((number) => agent.covered.includes(number))
+    return sum + (agrees ? weights[index] : 0)
+  }, 0)
+}
+
+function estimateRoi(mass, coveredCount) {
+  if (!coveredCount) {
+    return 0
+  }
+  return (36 * mass - coveredCount) / coveredCount
+}
+
+function entropy(probabilities) {
+  return probabilities.reduce(
+    (sum, probability) => sum - (probability > 0 ? probability * Math.log(probability) : 0),
+    0,
+  )
 }
 
 function getCoveredNumbers(center, span) {

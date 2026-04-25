@@ -160,6 +160,54 @@ button {
   padding: 20px;
 }
 
+.outcome-banner,
+.smart-card {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.055);
+}
+
+.outcome-banner {
+  grid-template-columns: 150px minmax(0, 1fr);
+  align-items: center;
+}
+
+.outcome-banner--hit {
+  border-color: rgba(42, 204, 119, 0.45);
+  background: rgba(42, 204, 119, 0.11);
+}
+
+.outcome-banner--miss {
+  border-color: rgba(222, 72, 72, 0.42);
+  background: rgba(222, 72, 72, 0.1);
+}
+
+.outcome-banner span,
+.smart-card span {
+  color: rgba(245, 241, 232, 0.58);
+  font-size: 0.72rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.outcome-banner strong,
+.smart-card strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 1.18rem;
+}
+
+.outcome-banner p,
+.smart-card p {
+  margin: 0;
+  color: rgba(245, 241, 232, 0.78);
+  line-height: 1.55;
+}
+
 .field-row {
   display: grid;
   grid-template-columns: 1.4fr 0.7fr 0.7fr;
@@ -387,6 +435,11 @@ input[type='range'] {
   gap: 12px;
 }
 
+.smart-card {
+  border-color: rgba(242, 207, 114, 0.25);
+  background: linear-gradient(135deg, rgba(242, 207, 114, 0.1), rgba(255, 255, 255, 0.035));
+}
+
 .section-title {
   display: flex;
   align-items: center;
@@ -486,7 +539,7 @@ textarea {
 
 .agent-card dl {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
   margin: 0;
 }
@@ -676,6 +729,7 @@ small {
   .topbar,
   .field-row,
   .quick-entry,
+  .outcome-banner,
   .metric-strip,
   .paper-score,
   .seed-actions,
@@ -720,5 +774,9 @@ small {
 
   .paper-row {
     grid-template-columns: 1fr;
+  }
+
+  .agent-card dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
