@@ -79,6 +79,13 @@ const DEFAULT_STATE = {
   unit: 0.5,
   bankroll: 100,
   seedText: '',
+  seedFields: {
+    colors: ['', '', ''],
+    parity: ['', ''],
+    ranges: ['', ''],
+    dozens: ['', '', ''],
+    columns: ['', '', ''],
+  },
   paperLog: [],
 }
 
@@ -86,9 +93,13 @@ function App() {
   const [savedState, setSavedState] = useLocalStorageState(STORAGE_KEY, DEFAULT_STATE)
   const [nextNumber, setNextNumber] = useState('')
   const [activeTab, setActiveTab] = useState('mesa')
+  const seedFields = savedState.seedFields ?? DEFAULT_STATE.seedFields
 
   const history = useMemo(() => parseNumbers(savedState.historyText), [savedState.historyText])
-  const seed = useMemo(() => parseSeedText(savedState.seedText), [savedState.seedText])
+  const seed = useMemo(
+    () => mergeSeeds(parseSeedText(savedState.seedText), parseSeedFields(seedFields)),
+    [savedState.seedText, seedFields],
+  )
   const seedDistribution = useMemo(() => buildSeedDistribution(seed), [seed])
   const population = useMemo(
     () => buildPopulation(history, savedState.span, seedDistribution),
@@ -107,6 +118,22 @@ function App() {
 
   function updateState(patch) {
     setSavedState((current) => ({ ...current, ...patch }))
+  }
+
+  function updateSeedField(group, index, value) {
+    const cleanedValue = value.replace(',', '.')
+    setSavedState((current) => {
+      const currentFields = current.seedFields ?? DEFAULT_STATE.seedFields
+      const nextGroup = [...currentFields[group]]
+      nextGroup[index] = cleanedValue
+      return {
+        ...current,
+        seedFields: {
+          ...currentFields,
+          [group]: nextGroup,
+        },
+      }
+    })
   }
 
   function appendNumber(value) {
@@ -340,19 +367,64 @@ function App() {
               <span>Seed do grafico</span>
               <div>
                 <button
-                  onClick={() => updateState({ seedText: SAMPLE_SEED_TEXT })}
+                  onClick={() =>
+                    updateState({
+                      seedText: SAMPLE_SEED_TEXT,
+                      seedFields: seedToFields(parseSeedText(SAMPLE_SEED_TEXT)),
+                    })
+                  }
                   type="button"
                 >
                   Print exemplo
                 </button>
-                <button onClick={() => updateState({ seedText: '' })} type="button">
+                <button
+                  onClick={() =>
+                    updateState({
+                      seedText: '',
+                      seedFields: DEFAULT_STATE.seedFields,
+                    })
+                  }
+                  type="button"
+                >
                   Limpar
                 </button>
               </div>
             </div>
+            <div className="seed-form">
+              <SeedNumberGroup
+                group="colors"
+                labels={['Vermelho', 'Preto', 'Verde']}
+                onChange={updateSeedField}
+                values={seedFields.colors}
+              />
+              <SeedNumberGroup
+                group="parity"
+                labels={['Pares', 'Impares']}
+                onChange={updateSeedField}
+                values={seedFields.parity}
+              />
+              <SeedNumberGroup
+                group="ranges"
+                labels={['1-18', '19-36']}
+                onChange={updateSeedField}
+                values={seedFields.ranges}
+              />
+              <SeedNumberGroup
+                group="dozens"
+                labels={['Duzia 1', 'Duzia 2', 'Duzia 3']}
+                onChange={updateSeedField}
+                values={seedFields.dozens}
+              />
+              <SeedNumberGroup
+                group="columns"
+                labels={['Coluna 1', 'Coluna 2', 'Coluna 3']}
+                onChange={updateSeedField}
+                values={seedFields.columns}
+              />
+            </div>
             <textarea
               onChange={(event) => updateState({ seedText: event.target.value })}
-              placeholder="Cole algo como: vermelho 47 preto 52 verde 1 pares 47 impares 53 duzias 30 34 32 colunas 31 34 31 ultimos 31 3 34..."
+              placeholder="Opcional: cole os ultimos numeros ou um texto do print. Ex: ultimos 31 3 34 10 11 33 29 17 3 25 23"
               value={savedState.seedText}
             />
             <div className="seed-actions">
@@ -374,6 +446,7 @@ function App() {
                 onClick={() => {
                   updateState({
                     seedText: SAMPLE_SEED_TEXT,
+                    seedFields: seedToFields(parseSeedText(SAMPLE_SEED_TEXT)),
                     historyText: parseSeedText(SAMPLE_SEED_TEXT).lastNumbers.join(', '),
                     paperLog: [],
                   })
@@ -542,6 +615,42 @@ function SeedLine({ label, values, names }) {
   )
 }
 
+function SeedNumberGroup({ group, labels, onChange, values }) {
+  return (
+    <fieldset className="seed-section">
+      <legend>{groupLabel(group)}</legend>
+      <div>
+        {labels.map((label, index) => (
+          <label key={label}>
+            {label}
+            <input
+              inputMode="decimal"
+              max="100"
+              min="0"
+              onChange={(event) => onChange(group, index, event.target.value)}
+              placeholder="%"
+              step="0.1"
+              type="number"
+              value={values[index]}
+            />
+          </label>
+        ))}
+      </div>
+    </fieldset>
+  )
+}
+
+function groupLabel(group) {
+  const labels = {
+    colors: 'Cores',
+    parity: 'Paridade',
+    ranges: 'Faixas',
+    dozens: 'Duzias',
+    columns: 'Colunas',
+  }
+  return labels[group]
+}
+
 function useLocalStorageState(key, fallback) {
   const [state, setState] = useState(() => {
     try {
@@ -623,6 +732,38 @@ function parseSeedText(text) {
   }
 
   return seed
+}
+
+function parseSeedFields(fields) {
+  return {
+    colors: parseFieldGroup(fields.colors, 3),
+    parity: parseFieldGroup(fields.parity, 2),
+    ranges: parseFieldGroup(fields.ranges, 2),
+    dozens: parseFieldGroup(fields.dozens, 3),
+    columns: parseFieldGroup(fields.columns, 3),
+    lastNumbers: [],
+  }
+}
+
+function mergeSeeds(textSeed, fieldSeed) {
+  return {
+    colors: fieldSeed.colors ?? textSeed.colors,
+    parity: fieldSeed.parity ?? textSeed.parity,
+    ranges: fieldSeed.ranges ?? textSeed.ranges,
+    dozens: fieldSeed.dozens ?? textSeed.dozens,
+    columns: fieldSeed.columns ?? textSeed.columns,
+    lastNumbers: textSeed.lastNumbers,
+  }
+}
+
+function seedToFields(seed) {
+  return {
+    colors: valuesToFieldGroup(seed.colors, 3),
+    parity: valuesToFieldGroup(seed.parity, 2),
+    ranges: valuesToFieldGroup(seed.ranges, 2),
+    dozens: valuesToFieldGroup(seed.dozens, 3),
+    columns: valuesToFieldGroup(seed.columns, 3),
+  }
 }
 
 function buildSeedDistribution(seed) {
@@ -1048,6 +1189,23 @@ function readFollowingNumbers(tokens, start) {
     }
   }
   return values
+}
+
+function parseFieldGroup(values, expectedLength) {
+  const numbers = Array.from({ length: expectedLength }, (_, index) => {
+    const value = Number(String(values?.[index] ?? '').replace(',', '.'))
+    return Number.isFinite(value) ? value : null
+  })
+
+  return numbers.some((value) => value !== null)
+    ? numbers.map((value) => clamp(value ?? 0, 0, 100))
+    : null
+}
+
+function valuesToFieldGroup(values, expectedLength) {
+  return Array.from({ length: expectedLength }, (_, index) =>
+    values?.[index] || values?.[index] === 0 ? String(values[index]) : '',
+  )
 }
 
 function formatPercent(value) {

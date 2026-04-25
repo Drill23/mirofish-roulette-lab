@@ -523,7 +523,44 @@ textarea {
 }
 
 .seed-card textarea {
-  min-height: 220px;
+  min-height: 120px;
+}
+
+.seed-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.seed-section {
+  min-width: 0;
+  margin: 0;
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.seed-section legend {
+  padding: 0 6px;
+  color: #f2cf72;
+  font-size: 0.82rem;
+  font-weight: 900;
+}
+
+.seed-section div {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.seed-section label {
+  font-size: 0.78rem;
+}
+
+.seed-section input {
+  min-height: 40px;
+  padding: 0 10px;
 }
 
 .seed-actions {
@@ -643,7 +680,12 @@ small {
   .paper-score,
   .seed-actions,
   .seed-grid,
+  .seed-form,
   .roulette-table {
+    grid-template-columns: 1fr;
+  }
+
+  .seed-section div {
     grid-template-columns: 1fr;
   }
 
