@@ -219,6 +219,9 @@ function App() {
 
       <section className="hero-grid">
         <aside className={`signal-card ${recommendationTone}`}>
+          <div className={`decision-pill decision-pill--${population.recommendation.decisionTone}`}>
+            {population.recommendation.decisionLabel}
+          </div>
           <p className="eyebrow">Proxima jogada</p>
           <div className="signal-card__number">{population.recommendation.center}</div>
           <div className="signal-card__meta">
@@ -934,6 +937,21 @@ function buildPopulation(history, span, seedDistribution = null) {
       : roiEstimate < 0.08 || confidence < 0.52
         ? 'paper'
         : 'bet'
+  const decision =
+    mode === 'bet'
+      ? {
+          label: `JOGUE AGORA: ${center} +${span}`,
+          tone: 'play',
+        }
+      : history.length < 10 || mode === 'paper'
+        ? {
+            label: `OBSERVE: ${center} +${span}`,
+            tone: 'watch',
+          }
+        : {
+            label: 'NAO JOGUE AGORA',
+            tone: 'skip',
+          }
 
   const message =
     mode === 'bet'
@@ -954,6 +972,8 @@ function buildPopulation(history, span, seedDistribution = null) {
       breakEven,
       confidence,
       consensus,
+      decisionLabel: decision.label,
+      decisionTone: decision.tone,
       smartCenter: smartCoverage.center,
       smartSpan: smartCoverage.span,
       smartMass: smartCoverage.mass,

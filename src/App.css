@@ -153,6 +153,32 @@ button {
   color: rgba(245, 241, 232, 0.78);
 }
 
+.decision-pill {
+  width: fit-content;
+  max-width: 100%;
+  padding: 9px 12px;
+  border-radius: 8px;
+  color: #11141a;
+  background: #f2cf72;
+  font-size: 0.82rem;
+  font-weight: 950;
+  letter-spacing: 0.04em;
+  overflow-wrap: anywhere;
+}
+
+.decision-pill--play {
+  background: #2acc77;
+}
+
+.decision-pill--watch {
+  background: #f2cf72;
+}
+
+.decision-pill--skip {
+  color: #f5f1e8;
+  background: #b82424;
+}
+
 .control-panel {
   display: grid;
   align-content: space-between;
