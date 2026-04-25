@@ -72,6 +72,12 @@ const AGENTS = [
     predict: predictMirrorScout,
   },
   {
+    id: 'landing',
+    name: 'Zona de pouso',
+    signal: 'previsao regional com vizinhos',
+    predict: predictLandingZone,
+  },
+  {
     id: 'seed',
     name: 'Seed do print',
     signal: 'graficos iniciais da mesa',
@@ -88,6 +94,7 @@ const AGENTS = [
 const DEFAULT_STATE = {
   historyText: '',
   span: 2,
+  autoRegion: true,
   unit: 0.5,
   bankroll: 100,
   seedText: '',
@@ -114,12 +121,19 @@ function App() {
   )
   const seedDistribution = useMemo(() => buildSeedDistribution(seed), [seed])
   const population = useMemo(
-    () => buildPopulation(history, savedState.span, seedDistribution),
-    [history, savedState.span, seedDistribution],
+    () => buildPopulation(history, savedState.span, seedDistribution, savedState.autoRegion ?? true),
+    [history, savedState.span, seedDistribution, savedState.autoRegion],
   )
   const backtest = useMemo(
-    () => runBacktest(history, savedState.span, savedState.unit, seedDistribution),
-    [history, savedState.span, savedState.unit, seedDistribution],
+    () =>
+      runBacktest(
+        history,
+        savedState.span,
+        savedState.unit,
+        seedDistribution,
+        savedState.autoRegion ?? true,
+      ),
+    [history, savedState.span, savedState.unit, seedDistribution, savedState.autoRegion],
   )
   const wheelCells = useMemo(
     () => buildWheelCells(population.recommendation.covered),
@@ -246,6 +260,15 @@ function App() {
               />
               <span>{savedState.span} para cada lado</span>
             </label>
+            <label className="toggle-field">
+              Regiao auto
+              <input
+                checked={savedState.autoRegion ?? true}
+                onChange={(event) => updateState({ autoRegion: event.target.checked })}
+                type="checkbox"
+              />
+              <span>{savedState.autoRegion ?? true ? 'modelo escolhe' : 'slider manda'}</span>
+            </label>
             <label>
               Ficha
               <input
@@ -348,16 +371,17 @@ function App() {
             <div className="history-editor">
               <div className="smart-card">
                 <div>
-                  <span>Modo inteligente</span>
+                  <span>Zona de pouso</span>
                   <strong>
-                    {population.recommendation.smartSpan} vizinhos / centro{' '}
-                    {population.recommendation.smartCenter}
+                    {population.recommendation.landingSpan} vizinhos / centro{' '}
+                    {population.recommendation.landingCenter}
                   </strong>
                 </div>
                 <p>
-                  Consenso {formatPercent(population.recommendation.consensus)}. Quebra-even{' '}
-                  {formatPercent(population.recommendation.breakEven)}. Confiança{' '}
-                  {formatPercent(population.recommendation.confidence)}.
+                  Região {population.recommendation.landingNumbers.join(', ')}. Consenso{' '}
+                  {formatPercent(population.recommendation.consensus)}. Confiança{' '}
+                  {formatPercent(population.recommendation.confidence)}.{' '}
+                  {savedState.autoRegion ?? true ? 'Usando região automática.' : 'Usando slider manual.'}
                 </p>
               </div>
 
@@ -879,7 +903,7 @@ function buildSeedDistribution(seed) {
   return smoothOnWheel(scores, 0.35)
 }
 
-function buildPopulation(history, span, seedDistribution = null) {
+function buildPopulation(history, span, seedDistribution = null, autoRegion = true) {
   const scores = Object.fromEntries(AGENTS.map((agent) => [agent.id, 0]))
   const context = { seedDistribution }
 
@@ -919,8 +943,10 @@ function buildPopulation(history, span, seedDistribution = null) {
     ),
   )
   const stabilized = normalize(combined.map((value) => value * 0.94 + UNIFORM_PROBABILITY * 0.06))
-  const center = findBestCenter(stabilized, span)
-  const covered = getCoveredNumbers(center, span)
+  const landingCoverage = findLandingCoverage(stabilized, history)
+  const activeSpan = autoRegion ? landingCoverage.span : span
+  const center = autoRegion ? landingCoverage.center : findBestCenter(stabilized, span)
+  const covered = getCoveredNumbers(center, activeSpan)
   const mass = covered.reduce((sum, number) => sum + stabilized[number], 0)
   const baseline = covered.length / NUMBER_COUNT
   const breakEven = covered.length / 36
@@ -940,12 +966,12 @@ function buildPopulation(history, span, seedDistribution = null) {
   const decision =
     mode === 'bet'
       ? {
-          label: `JOGUE AGORA: ${center} +${span}`,
+          label: `JOGUE AGORA: ${center} +${activeSpan}`,
           tone: 'play',
         }
       : history.length < 10 || mode === 'paper'
         ? {
-            label: `OBSERVE: ${center} +${span}`,
+            label: `OBSERVE: ${center} +${activeSpan}`,
             tone: 'watch',
           }
         : {
@@ -978,6 +1004,12 @@ function buildPopulation(history, span, seedDistribution = null) {
       smartSpan: smartCoverage.span,
       smartMass: smartCoverage.mass,
       smartRoi: smartCoverage.roiEstimate,
+      landingCenter: landingCoverage.center,
+      landingSpan: landingCoverage.span,
+      landingMass: landingCoverage.mass,
+      landingNumbers: landingCoverage.covered,
+      activeSpan,
+      autoRegion,
       mass,
       mode,
       message,
@@ -989,7 +1021,7 @@ function buildPopulation(history, span, seedDistribution = null) {
   }
 }
 
-function runBacktest(history, span, unit, seedDistribution = null) {
+function runBacktest(history, span, unit, seedDistribution = null, autoRegion = true) {
   if (history.length < 12) {
     return {
       bets: 0,
@@ -1016,7 +1048,7 @@ function runBacktest(history, span, unit, seedDistribution = null) {
   for (let index = 10; index < history.length; index += 1) {
     const prefix = history.slice(0, index)
     const actual = history[index]
-    const recommendation = buildPopulation(prefix, span, seedDistribution).recommendation
+    const recommendation = buildPopulation(prefix, span, seedDistribution, autoRegion).recommendation
     const shouldBet = recommendation.mode !== 'hold'
     const covered = recommendation.covered
     const randomCenter = WHEEL_ORDER[index % WHEEL_ORDER.length]
@@ -1052,7 +1084,8 @@ function runBacktest(history, span, unit, seedDistribution = null) {
 
 function settlePaperRound({ recommendation, actual, span, unit, historyLength }) {
   const action = historyLength >= 10 && recommendation.mode !== 'hold' ? 'bet' : 'observe'
-  const covered = action === 'bet' ? recommendation.covered : getCoveredNumbers(recommendation.center, span)
+  const covered = recommendation.covered
+  const activeSpan = recommendation.activeSpan ?? span
   const wouldNet = settleRoulette(covered, actual, unit)
   const net = action === 'bet' ? wouldNet : 0
 
@@ -1061,7 +1094,7 @@ function settlePaperRound({ recommendation, actual, span, unit, historyLength })
     action,
     actual,
     center: recommendation.center,
-    span,
+    span: activeSpan,
     covered,
     hit: covered.includes(actual),
     net,
@@ -1230,6 +1263,75 @@ function predictMirrorScout(history) {
   return smoothOnWheel(scores, 0.7)
 }
 
+function predictLandingZone(history) {
+  const scores = Array(NUMBER_COUNT).fill(0.18)
+  if (history.length < 3) {
+    return predictSector(history)
+  }
+
+  const positions = history.map((number) => WHEEL_ORDER.indexOf(number))
+  const lastPosition = positions.at(-1)
+  const recentWindow = history.slice(-72)
+
+  recentWindow.forEach((number, index) => {
+    const recency = 0.45 + (index + 1) / recentWindow.length
+    addWheelKernel(scores, WHEEL_ORDER.indexOf(number), recency * 0.55, 2.4)
+  })
+
+  const jumps = []
+  for (let index = 1; index < positions.length; index += 1) {
+    jumps.push(mod(positions[index] - positions[index - 1], WHEEL_ORDER.length))
+  }
+
+  const currentSignature = jumps.slice(-3)
+  for (let index = 3; index < jumps.length; index += 1) {
+    const pastSignature = jumps.slice(index - 3, index)
+    const similarity = signatureSimilarity(currentSignature, pastSignature)
+    if (similarity <= 0) {
+      continue
+    }
+
+    const projectedPosition = mod(lastPosition + jumps[index], WHEEL_ORDER.length)
+    addWheelKernel(scores, projectedPosition, similarity * 2.2, 2.2)
+  }
+
+  jumps.slice(-18).forEach((jump, index) => {
+    const projectedPosition = mod(lastPosition + jump, WHEEL_ORDER.length)
+    addWheelKernel(scores, projectedPosition, (0.5 + index / 18) * 0.9, 2.8)
+  })
+
+  for (let index = 0; index < history.length - 1; index += 1) {
+    const distance = circularDistance(positions[index], lastPosition, WHEEL_ORDER.length)
+    if (distance <= 5) {
+      const nextPosition = positions[index + 1]
+      addWheelKernel(scores, nextPosition, (6 - distance) * 0.48, 2.1)
+    }
+  }
+
+  return normalize(scores)
+}
+
+function addWheelKernel(scores, position, weight, radius) {
+  WHEEL_ORDER.forEach((number, wheelIndex) => {
+    const distance = circularDistance(position, wheelIndex, WHEEL_ORDER.length)
+    const curve = Math.exp(-(distance * distance) / (2 * radius * radius))
+    scores[number] += weight * curve
+  })
+}
+
+function signatureSimilarity(currentSignature, pastSignature) {
+  if (!currentSignature.length || currentSignature.length !== pastSignature.length) {
+    return 0
+  }
+
+  const distance = currentSignature.reduce((sum, jump, index) => {
+    const rawDistance = Math.abs(jump - pastSignature[index])
+    return sum + Math.min(rawDistance, WHEEL_ORDER.length - rawDistance)
+  }, 0)
+
+  return Math.exp(-distance / (currentSignature.length * 4.5))
+}
+
 function predictSeed(_history, context = {}) {
   return context.seedDistribution ?? predictSkeptic()
 }
@@ -1276,6 +1378,49 @@ function findSmartCoverage(probabilities) {
   }
 
   return best
+}
+
+function findLandingCoverage(probabilities, history) {
+  const evidenceFactor = clamp(history.length / 80, 0.35, 1)
+  let best = null
+
+  for (let span = 2; span <= 9; span += 1) {
+    WHEEL_ORDER.forEach((center) => {
+      const covered = getCoveredNumbers(center, span)
+      const mass = covered.reduce((sum, number) => sum + probabilities[number], 0)
+      const roiEstimate = estimateRoi(mass, covered.length)
+      const baselineGap = mass - covered.length / NUMBER_COUNT
+      const breakEvenGap = mass - covered.length / 36
+      const compactBonus = 1 / Math.sqrt(covered.length)
+      const spanPenalty = Math.abs(span - 3) * 0.012
+      const score =
+        (roiEstimate * 0.58 + baselineGap * 1.4 + breakEvenGap * 2.2 + compactBonus * 0.08) *
+          evidenceFactor -
+        spanPenalty
+
+      if (!best || score > best.score) {
+        best = {
+          center,
+          span,
+          covered,
+          mass,
+          roiEstimate,
+          score,
+        }
+      }
+    })
+  }
+
+  return (
+    best ?? {
+      center: 0,
+      span: 2,
+      covered: getCoveredNumbers(0, 2),
+      mass: getCoveredNumbers(0, 2).reduce((sum, number) => sum + probabilities[number], 0),
+      roiEstimate: 0,
+      score: 0,
+    }
+  )
 }
 
 function calculateConsensus(agentRows, weights, covered) {
