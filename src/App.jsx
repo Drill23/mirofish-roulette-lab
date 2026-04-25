@@ -66,6 +66,12 @@ const AGENTS = [
     predict: predictBayesWheel,
   },
   {
+    id: 'harmonic',
+    name: 'Ressonancia',
+    signal: 'harmonicos circulares do volante',
+    predict: predictHarmonicResonance,
+  },
+  {
     id: 'mirror',
     name: 'Mirror scout',
     signal: 'padroes que repetem no espelho',
@@ -199,11 +205,7 @@ function App() {
   }
 
   const recommendationTone =
-    population.recommendation.mode === 'bet'
-      ? 'signal-card--go'
-      : population.recommendation.mode === 'paper'
-        ? 'signal-card--paper'
-        : 'signal-card--hold'
+    population.recommendation.mode === 'bet' ? 'signal-card--go' : 'signal-card--hold'
 
   return (
     <main className="app-shell">
@@ -379,7 +381,8 @@ function App() {
                 </div>
                 <p>
                   Região {population.recommendation.landingNumbers.join(', ')}. Consenso{' '}
-                  {formatPercent(population.recommendation.consensus)}. Confiança{' '}
+                  {formatPercent(population.recommendation.consensus)}. Lift regional{' '}
+                  {formatSignedPercent(population.recommendation.landingLift)}. Confiança{' '}
                   {formatPercent(population.recommendation.confidence)}.{' '}
                   {savedState.autoRegion ?? true ? 'Usando região automática.' : 'Usando slider manual.'}
                 </p>
@@ -601,21 +604,31 @@ function App() {
               <span style={{ width: `${Math.min(savedState.paperLog.length, 10) * 10}%` }} />
             </div>
             <p className="risk-note">
-              Use as primeiras 10 rodadas como ensaio de fluxo. Vantagem real pede amostra maior e
-              resultado melhor que o controle aleatorio.
+              Use as primeiras 10 rodadas como ensaio de fluxo. So conte como entrada quando o
+              painel disser jogar; o restante fica registrado como nao jogo.
             </p>
             <div className="paper-log">
               {savedState.paperLog.length ? (
                 savedState.paperLog.slice(0, 10).map((entry) => (
                   <div className="paper-row" key={entry.id}>
-                    <span className={entry.hit ? 'hit' : 'miss'}>
+                    <span
+                      className={
+                        entry.action === 'bet'
+                          ? entry.hit
+                            ? 'hit'
+                            : 'miss'
+                          : (entry.wouldNet ?? 0) <= 0
+                            ? 'hit'
+                            : 'miss'
+                      }
+                    >
                       {entry.action === 'bet'
                         ? entry.hit
                           ? 'Ganhou'
                           : 'Perdeu'
-                        : entry.hit
-                          ? 'Teria ganho'
-                          : 'Teria perdido'}
+                        : (entry.wouldNet ?? 0) <= 0
+                          ? 'Evitou perda'
+                          : 'Perdeu chance'}
                     </span>
                     <strong>
                       {entry.center} +{entry.span ?? Math.max((entry.covered.length - 1) / 2, 0)} / saiu{' '}
@@ -637,7 +650,7 @@ function App() {
             <div className="paper-score">
               <Metric label="Apostas" value={backtest.bets} />
               <Metric label="Acertos" value={backtest.wins} />
-              <Metric label="Skips" value={backtest.skips} />
+              <Metric label="Nao jogos" value={backtest.skips} />
               <Metric label="ROI" value={formatSignedPercent(backtest.roi)} />
             </div>
             <div className="audit-list">
@@ -676,10 +689,17 @@ function OutcomeBanner({ entry }) {
       ? entry.hit
         ? 'Ganhou essa'
         : 'Perdeu essa'
-      : entry.hit
-        ? 'Teria ganho'
-        : 'Teria perdido'
-  const tone = entry.hit ? 'outcome-banner--hit' : 'outcome-banner--miss'
+      : (entry.wouldNet ?? 0) <= 0
+        ? 'Nao jogou: evitou perda'
+        : 'Nao jogou: perdeu chance'
+  const tone =
+    entry.action === 'bet'
+      ? entry.hit
+        ? 'outcome-banner--hit'
+        : 'outcome-banner--miss'
+      : (entry.wouldNet ?? 0) <= 0
+        ? 'outcome-banner--hit'
+        : 'outcome-banner--miss'
   const value = entry.action === 'bet' ? entry.net : (entry.wouldNet ?? entry.net)
   const span = entry.span ?? Math.max((entry.covered.length - 1) / 2, 0)
 
@@ -691,7 +711,7 @@ function OutcomeBanner({ entry }) {
       </div>
       <p>
         Escolha {entry.center} +{span} cobria {entry.covered.length} numeros. Saiu{' '}
-        <b>{entry.actual}</b>. {entry.action === 'bet' ? 'Resultado' : 'Simulado'}:{' '}
+        <b>{entry.actual}</b>. {entry.action === 'bet' ? 'Resultado' : 'Nao jogo simulado'}:{' '}
         <b>{formatMoney(value)}</b>.
       </p>
     </div>
@@ -954,39 +974,46 @@ function buildPopulation(history, span, seedDistribution = null, autoRegion = tr
   const roiEstimate = estimateRoi(mass, covered.length)
   const entropyScore = 1 - entropy(stabilized) / Math.log(NUMBER_COUNT)
   const consensus = calculateConsensus(agentRows, weights, covered)
-  const confidence = clamp(entropyScore * 1.25 + Math.max(edge, 0) * 2.2 + consensus * 0.35, 0, 1)
+  const regionalQuality = clamp(
+    Math.max(landingCoverage.lift, 0) * 0.45 +
+      Math.max(landingCoverage.contrast, 0) * NUMBER_COUNT * 0.7 +
+      landingCoverage.fieldAgreement * 0.25,
+    0,
+    1,
+  )
+  const confidence = clamp(
+    entropyScore * 1.05 + Math.max(edge, 0) * 2.05 + consensus * 0.32 + regionalQuality * 0.28,
+    0,
+    1,
+  )
   const smartCoverage = findSmartCoverage(stabilized)
   const leader = agentRows[weights.indexOf(Math.max(...weights))]
+  const playScore =
+    roiEstimate * 0.5 +
+    confidence * 0.3 +
+    Math.max(landingCoverage.lift, 0) * 0.14 +
+    landingCoverage.fieldAgreement * 0.08
   const mode =
-    history.length < 10 || roiEstimate < 0.015 || confidence < 0.28
-      ? 'hold'
-      : roiEstimate < 0.08 || confidence < 0.52
-        ? 'paper'
-        : 'bet'
+    history.length >= 10 && roiEstimate >= 0.025 && confidence >= 0.38 && playScore >= 0.17
+      ? 'bet'
+      : 'hold'
   const decision =
     mode === 'bet'
       ? {
           label: `JOGUE AGORA: ${center} +${activeSpan}`,
           tone: 'play',
         }
-      : history.length < 10 || mode === 'paper'
-        ? {
-            label: `OBSERVE: ${center} +${activeSpan}`,
-            tone: 'watch',
-          }
-        : {
-            label: 'NAO JOGUE AGORA',
-            tone: 'skip',
-          }
+      : {
+          label: 'NAO JOGUE AGORA',
+          tone: 'skip',
+        }
 
   const message =
     mode === 'bet'
-      ? `Populacao inclinada para ${leader.name}. Sinal acima do ponto de equilibrio.`
-      : mode === 'paper'
-        ? `Sinal existe, mas ainda e paper. Lider: ${leader.name}; confirme no teste.`
-        : history.length < 10
-          ? 'Carregue pelo menos 10 giros para os agentes acordarem.'
-          : 'Sem vantagem clara contra equilibrio e aleatorio. Melhor observar.'
+      ? `Populacao inclinada para ${leader.name}. A regiao passou o corte binario.`
+      : history.length < 10
+        ? 'Carregue pelo menos 10 giros para liberar decisao de jogo.'
+        : 'Sinal regional abaixo do corte. Nao jogar agora.'
 
   return {
     probabilities: stabilized,
@@ -1008,11 +1035,15 @@ function buildPopulation(history, span, seedDistribution = null, autoRegion = tr
       landingSpan: landingCoverage.span,
       landingMass: landingCoverage.mass,
       landingNumbers: landingCoverage.covered,
+      landingLift: landingCoverage.lift,
+      landingContrast: landingCoverage.contrast,
+      landingFieldAgreement: landingCoverage.fieldAgreement,
       activeSpan,
       autoRegion,
       mass,
       mode,
       message,
+      playScore,
     },
     agents: agentRows
       .map((agent, index) => ({ ...agent, weight: weights[index] }))
@@ -1049,7 +1080,7 @@ function runBacktest(history, span, unit, seedDistribution = null, autoRegion = 
     const prefix = history.slice(0, index)
     const actual = history[index]
     const recommendation = buildPopulation(prefix, span, seedDistribution, autoRegion).recommendation
-    const shouldBet = recommendation.mode !== 'hold'
+    const shouldBet = recommendation.mode === 'bet'
     const covered = recommendation.covered
     const randomCenter = WHEEL_ORDER[index % WHEEL_ORDER.length]
     const randomCovered = getCoveredNumbers(randomCenter, span)
@@ -1083,7 +1114,7 @@ function runBacktest(history, span, unit, seedDistribution = null, autoRegion = 
 }
 
 function settlePaperRound({ recommendation, actual, span, unit, historyLength }) {
-  const action = historyLength >= 10 && recommendation.mode !== 'hold' ? 'bet' : 'observe'
+  const action = historyLength >= 10 && recommendation.mode === 'bet' ? 'bet' : 'skip'
   const covered = recommendation.covered
   const activeSpan = recommendation.activeSpan ?? span
   const wouldNet = settleRoulette(covered, actual, unit)
@@ -1240,6 +1271,34 @@ function predictBayesWheel(history) {
   return normalize(scores)
 }
 
+function predictHarmonicResonance(history) {
+  const scores = Array(NUMBER_COUNT).fill(0.22)
+  if (!history.length) {
+    return normalize(scores)
+  }
+
+  const recent = history.slice(-96)
+
+  recent.forEach((number, index) => {
+    const position = WHEEL_ORDER.indexOf(number)
+    const recency = 0.25 + (index + 1) / recent.length
+    addWheelKernel(scores, position, recency * 0.22, 2.6)
+  })
+
+  for (let harmonic = 1; harmonic <= 4; harmonic += 1) {
+    const wave = circularHarmonic(recent, harmonic)
+    const harmonicWeight = harmonic === 1 ? 2.15 : 1.35 / Math.sqrt(harmonic)
+
+    WHEEL_ORDER.forEach((number, position) => {
+      const angle = (position / WHEEL_ORDER.length) * Math.PI * 2
+      const resonance = (Math.cos(harmonic * angle - wave.phase) + 1) / 2
+      scores[number] += resonance * wave.amplitude * harmonicWeight
+    })
+  }
+
+  return normalize(scores)
+}
+
 function predictMirrorScout(history) {
   const scores = Array(NUMBER_COUNT).fill(0.25)
   if (history.length < 4) {
@@ -1308,6 +1367,11 @@ function predictLandingZone(history) {
     }
   }
 
+  const regionalField = buildRegionalField(history)
+  regionalField.probabilities.forEach((probability, number) => {
+    scores[number] += probability * (2.8 + regionalField.concentration * 3.2)
+  })
+
   return normalize(scores)
 }
 
@@ -1330,6 +1394,121 @@ function signatureSimilarity(currentSignature, pastSignature) {
   }, 0)
 
   return Math.exp(-distance / (currentSignature.length * 4.5))
+}
+
+function buildRegionalField(history) {
+  const scores = Array(NUMBER_COUNT).fill(0.16)
+  if (history.length < 4) {
+    return {
+      probabilities: normalize(scores),
+      concentration: 0,
+      projectedNumber: history.at(-1) ?? 0,
+    }
+  }
+
+  const positions = history.map((number) => WHEEL_ORDER.indexOf(number))
+  const lastPosition = positions.at(-1)
+  const recentPositions = positions.slice(-64)
+  const recentWeights = recentPositions.map((_, index) => 0.35 + (index + 1) / recentPositions.length)
+  const sectorMean = circularMean(recentPositions, recentWeights, WHEEL_ORDER.length)
+
+  const jumps = []
+  for (let index = 1; index < positions.length; index += 1) {
+    jumps.push(mod(positions[index] - positions[index - 1], WHEEL_ORDER.length))
+  }
+  const recentJumps = jumps.slice(-42)
+  const jumpWeights = recentJumps.map((_, index) => 0.4 + (index + 1) / recentJumps.length)
+  const jumpMean = circularMean(recentJumps, jumpWeights, WHEEL_ORDER.length)
+
+  const accelerations = []
+  for (let index = 1; index < jumps.length; index += 1) {
+    accelerations.push(mod(jumps[index] - jumps[index - 1], WHEEL_ORDER.length))
+  }
+  const recentAccelerations = accelerations.slice(-30)
+  const accelerationWeights = recentAccelerations.map(
+    (_, index) => 0.35 + (index + 1) / Math.max(recentAccelerations.length, 1),
+  )
+  const accelerationMean = circularMean(
+    recentAccelerations.length ? recentAccelerations : [0],
+    recentAccelerations.length ? accelerationWeights : [1],
+    WHEEL_ORDER.length,
+  )
+
+  const drift = signedCircularOffset(accelerationMean.coordinate, WHEEL_ORDER.length)
+  const projectedOffset =
+    signedCircularOffset(jumpMean.coordinate, WHEEL_ORDER.length) +
+    drift * clamp(accelerationMean.concentration, 0, 0.65) * 0.55
+  const projectedPosition = mod(Math.round(lastPosition + projectedOffset), WHEEL_ORDER.length)
+  const concentration = clamp(
+    jumpMean.concentration * 0.52 + sectorMean.concentration * 0.32 + accelerationMean.concentration * 0.16,
+    0,
+    1,
+  )
+  const projectedRadius = clamp(4.8 - concentration * 2.8, 1.45, 4.8)
+
+  addWheelKernel(scores, projectedPosition, 2.9 + concentration * 3.4, projectedRadius)
+  addWheelKernel(scores, sectorMean.position, 1.25 + sectorMean.concentration * 3.1, 3.4)
+
+  recentPositions.slice(-18).forEach((position, index) => {
+    addWheelKernel(scores, position, (0.24 + index / 36) * (1 + sectorMean.concentration), 2.2)
+  })
+
+  return {
+    probabilities: normalize(scores),
+    concentration,
+    projectedNumber: WHEEL_ORDER[projectedPosition],
+  }
+}
+
+function circularHarmonic(numbers, harmonic) {
+  let real = 0
+  let imaginary = 0
+  let totalWeight = 0
+
+  numbers.forEach((number, index) => {
+    const position = WHEEL_ORDER.indexOf(number)
+    const angle = harmonic * (position / WHEEL_ORDER.length) * Math.PI * 2
+    const weight = 0.3 + (index + 1) / numbers.length
+    real += Math.cos(angle) * weight
+    imaginary += Math.sin(angle) * weight
+    totalWeight += weight
+  })
+
+  return {
+    amplitude: totalWeight ? Math.sqrt(real * real + imaginary * imaginary) / totalWeight : 0,
+    phase: Math.atan2(imaginary, real),
+  }
+}
+
+function circularMean(values, weights, length) {
+  let real = 0
+  let imaginary = 0
+  let totalWeight = 0
+
+  values.forEach((value, index) => {
+    const weight = weights[index] ?? 1
+    const angle = (value / length) * Math.PI * 2
+    real += Math.cos(angle) * weight
+    imaginary += Math.sin(angle) * weight
+    totalWeight += weight
+  })
+
+  if (!totalWeight) {
+    return { position: 0, coordinate: 0, concentration: 0 }
+  }
+
+  const angle = Math.atan2(imaginary, real)
+  const coordinate = mod((angle / (Math.PI * 2)) * length, length)
+  return {
+    position: mod(Math.round(coordinate), length),
+    coordinate,
+    concentration: Math.sqrt(real * real + imaginary * imaginary) / totalWeight,
+  }
+}
+
+function signedCircularOffset(value, length) {
+  const wrapped = mod(value, length)
+  return wrapped > length / 2 ? wrapped - length : wrapped
 }
 
 function predictSeed(_history, context = {}) {
@@ -1382,19 +1561,38 @@ function findSmartCoverage(probabilities) {
 
 function findLandingCoverage(probabilities, history) {
   const evidenceFactor = clamp(history.length / 80, 0.35, 1)
+  const regionalField = buildRegionalField(history)
   let best = null
 
   for (let span = 2; span <= 9; span += 1) {
     WHEEL_ORDER.forEach((center) => {
       const covered = getCoveredNumbers(center, span)
+      const outerRing = getOuterRingNumbers(center, span, Math.min(span + 3, 12))
       const mass = covered.reduce((sum, number) => sum + probabilities[number], 0)
+      const outerMass = outerRing.reduce((sum, number) => sum + probabilities[number], 0)
+      const fieldMass = covered.reduce(
+        (sum, number) => sum + regionalField.probabilities[number],
+        0,
+      )
       const roiEstimate = estimateRoi(mass, covered.length)
       const baselineGap = mass - covered.length / NUMBER_COUNT
       const breakEvenGap = mass - covered.length / 36
+      const insideAverage = mass / covered.length
+      const outsideAverage = outerRing.length ? outerMass / outerRing.length : UNIFORM_PROBABILITY
+      const contrast = insideAverage - outsideAverage
+      const lift = insideAverage / UNIFORM_PROBABILITY - 1
+      const fieldAgreement = fieldMass / Math.max(covered.length / NUMBER_COUNT, 0.0001)
       const compactBonus = 1 / Math.sqrt(covered.length)
       const spanPenalty = Math.abs(span - 3) * 0.012
       const score =
-        (roiEstimate * 0.58 + baselineGap * 1.4 + breakEvenGap * 2.2 + compactBonus * 0.08) *
+        (roiEstimate * 0.5 +
+          baselineGap * 1.1 +
+          breakEvenGap * 1.9 +
+          Math.max(contrast, 0) * NUMBER_COUNT * 0.28 +
+          Math.max(lift, 0) * 0.06 +
+          fieldAgreement * 0.08 +
+          regionalField.concentration * 0.09 +
+          compactBonus * 0.06) *
           evidenceFactor -
         spanPenalty
 
@@ -1405,6 +1603,10 @@ function findLandingCoverage(probabilities, history) {
           covered,
           mass,
           roiEstimate,
+          contrast,
+          lift,
+          fieldAgreement: clamp(fieldAgreement, 0, 1.8),
+          projectedNumber: regionalField.projectedNumber,
           score,
         }
       }
@@ -1418,6 +1620,10 @@ function findLandingCoverage(probabilities, history) {
       covered: getCoveredNumbers(0, 2),
       mass: getCoveredNumbers(0, 2).reduce((sum, number) => sum + probabilities[number], 0),
       roiEstimate: 0,
+      contrast: 0,
+      lift: 0,
+      fieldAgreement: 0,
+      projectedNumber: regionalField.projectedNumber,
       score: 0,
     }
   )
@@ -1455,6 +1661,21 @@ function getCoveredNumbers(center, span) {
     covered.push(WHEEL_ORDER[mod(centerIndex + offset, WHEEL_ORDER.length)])
   }
   return covered
+}
+
+function getOuterRingNumbers(center, innerSpan, outerSpan) {
+  const centerIndex = WHEEL_ORDER.indexOf(center)
+  if (centerIndex < 0) {
+    return []
+  }
+
+  const ring = []
+  for (let offset = -outerSpan; offset <= outerSpan; offset += 1) {
+    if (Math.abs(offset) > innerSpan) {
+      ring.push(WHEEL_ORDER[mod(centerIndex + offset, WHEEL_ORDER.length)])
+    }
+  }
+  return ring
 }
 
 function smoothOnWheel(scores, strength) {

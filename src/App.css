@@ -116,11 +116,6 @@ button {
   background: linear-gradient(145deg, rgba(21, 89, 55, 0.86), rgba(13, 18, 26, 0.82));
 }
 
-.signal-card--paper {
-  border-color: rgba(242, 207, 114, 0.46);
-  background: linear-gradient(145deg, rgba(95, 70, 20, 0.76), rgba(13, 18, 26, 0.82));
-}
-
 .signal-card--hold {
   border-color: rgba(222, 72, 72, 0.42);
   background: linear-gradient(145deg, rgba(93, 30, 34, 0.75), rgba(13, 18, 26, 0.82));
@@ -168,10 +163,6 @@ button {
 
 .decision-pill--play {
   background: #2acc77;
-}
-
-.decision-pill--watch {
-  background: #f2cf72;
 }
 
 .decision-pill--skip {
