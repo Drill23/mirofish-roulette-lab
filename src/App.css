@@ -491,6 +491,11 @@ input[type='range'] {
   background: linear-gradient(135deg, rgba(42, 204, 119, 0.09), rgba(255, 255, 255, 0.035));
 }
 
+.smart-card--quadrant {
+  border-color: rgba(120, 170, 255, 0.25);
+  background: linear-gradient(135deg, rgba(120, 170, 255, 0.09), rgba(255, 255, 255, 0.035));
+}
+
 .section-title {
   display: flex;
   align-items: center;

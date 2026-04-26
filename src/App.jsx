@@ -12,6 +12,13 @@ const TABLE_ROWS = [
   [1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31, 34],
 ]
 
+const TABLE_QUADRANTS = [
+  [3, 6, 9, 2, 5, 8, 1, 4, 7],
+  [12, 15, 18, 11, 14, 17, 10, 13, 16],
+  [21, 24, 27, 20, 23, 26, 19, 22, 25],
+  [30, 33, 36, 29, 32, 35, 28, 31, 34],
+]
+
 const RED_NUMBERS = new Set([
   1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36,
 ])
@@ -74,6 +81,12 @@ const AGENTS = [
     name: 'Ressonancia',
     signal: 'harmonicos circulares do volante',
     predict: predictHarmonicResonance,
+  },
+  {
+    id: 'quadrants',
+    name: 'Quadrantes',
+    signal: '4 regioes matematicas da mesa',
+    predict: predictTableQuadrants,
   },
   {
     id: 'mirror',
@@ -389,6 +402,21 @@ function App() {
                   {formatPercent(population.recommendation.judge.breakEven)}. Mesa{' '}
                   {formatPercent(population.recommendation.judge.stability)}.{' '}
                   {population.recommendation.judge.reason}
+                </p>
+              </div>
+
+              <div className="smart-card smart-card--quadrant">
+                <div>
+                  <span>Quadrantes da mesa</span>
+                  <strong>
+                    Região {population.recommendation.tableQuadrant.region} / alvo{' '}
+                    {population.recommendation.tableQuadrant.center}
+                  </strong>
+                </div>
+                <p>
+                  Base {population.recommendation.tableQuadrant.numbers.join(', ')}. Força{' '}
+                  {formatPercent(population.recommendation.tableQuadrant.weight)}. Melhores centros{' '}
+                  {population.recommendation.tableQuadrant.candidates.join(', ')}.
                 </p>
               </div>
 
@@ -984,6 +1012,7 @@ function buildPopulation(history, span = FIXED_SPAN, seedDistribution = null, op
   const stabilized = normalize(combined.map((value) => value * 0.94 + UNIFORM_PROBABILITY * 0.06))
   const activeSpan = span
   const landingCoverage = findLandingCoverage(stabilized, history, activeSpan)
+  const tableQuadrant = analyzeTableQuadrant(history, stabilized, activeSpan)
   const center = landingCoverage.center
   const covered = landingCoverage.covered
   const mass = covered.reduce((sum, number) => sum + stabilized[number], 0)
@@ -1075,6 +1104,7 @@ function buildPopulation(history, span = FIXED_SPAN, seedDistribution = null, op
       landingCoreLift: landingCoverage.coreLift,
       landingMemoryLift: landingCoverage.memoryLift,
       landingRimGap: landingCoverage.rimGap,
+      tableQuadrant,
       activeSpan,
       fixedSpan: true,
       judge,
@@ -1603,6 +1633,39 @@ function predictHarmonicResonance(history) {
   return normalize(scores)
 }
 
+function predictTableQuadrants(history) {
+  const scores = Array(NUMBER_COUNT).fill(0.12)
+  if (!history.length) {
+    return normalize(scores)
+  }
+
+  const signal = buildTableQuadrantSignal(history)
+  const recent = history.slice(-72)
+
+  TABLE_QUADRANTS.forEach((numbers, quadrantIndex) => {
+    const regionWeight = signal.weights[quadrantIndex]
+
+    numbers.forEach((number) => {
+      const directHits = recent.reduce((sum, hit, index) => {
+        if (hit !== number) {
+          return sum
+        }
+        return sum + Math.exp(-(recent.length - index - 1) / 18)
+      }, 0)
+      const localColumn = Math.floor((number - 1) / 3) % 3
+      const columnBalance = 1 + (localColumn === 1 ? 0.12 : 0)
+
+      scores[number] += regionWeight * columnBalance * (1.5 + directHits)
+      addWheelKernel(scores, WHEEL_ORDER.indexOf(number), regionWeight * 0.32, 2.2)
+    })
+  })
+
+  const zeroRecent = recent.filter((number) => number === 0).length
+  scores[0] += zeroRecent ? zeroRecent / Math.max(recent.length, 1) : 0.08
+
+  return normalize(scores)
+}
+
 function predictMirrorScout(history) {
   const scores = Array(NUMBER_COUNT).fill(0.25)
   if (history.length < 4) {
@@ -1801,6 +1864,84 @@ function buildRegionalField(history) {
   }
 }
 
+function buildTableQuadrantSignal(history) {
+  const weights = Array(4).fill(1.2)
+  const transitions = Array.from({ length: 5 }, () => Array(4).fill(0.35))
+  const quadrants = history.map(getTableQuadrantState)
+
+  history.forEach((number, index) => {
+    const quadrant = getTableQuadrant(number)
+    if (quadrant < 0) {
+      return
+    }
+
+    const age = history.length - index - 1
+    weights[quadrant] += Math.exp(-age / 30) * 1.45
+    if (age < 18) {
+      weights[quadrant] += Math.exp(-age / 8) * 0.95
+    }
+  })
+
+  for (let index = 1; index < quadrants.length; index += 1) {
+    const previous = quadrants[index - 1]
+    const current = getTableQuadrant(history[index])
+    if (current < 0) {
+      continue
+    }
+
+    const age = quadrants.length - index - 1
+    transitions[previous][current] += Math.exp(-age / 34) * 2.1
+  }
+
+  const lastState = quadrants.at(-1) ?? 4
+  transitions[lastState].forEach((value, quadrant) => {
+    weights[quadrant] += value * 1.2
+  })
+
+  const recentQuadrants = quadrants.filter((quadrant) => quadrant >= 0).slice(-3)
+  if (recentQuadrants.length >= 2) {
+    const last = recentQuadrants.at(-1)
+    const previous = recentQuadrants.at(-2)
+    const direction = mod(last - previous, 4)
+    const projected = direction === 0 ? last : mod(last + direction, 4)
+    weights[projected] += 1.15
+  }
+
+  return {
+    weights: normalizeToLength(weights),
+    transitions,
+  }
+}
+
+function analyzeTableQuadrant(history, probabilities, span) {
+  const signal = buildTableQuadrantSignal(history)
+  const regionIndex = signal.weights.indexOf(Math.max(...signal.weights))
+  const numbers = TABLE_QUADRANTS[regionIndex]
+  const candidates = numbers
+    .map((number) => {
+      const covered = getCoveredNumbers(number, span)
+      const mass = covered.reduce((sum, coveredNumber) => sum + probabilities[coveredNumber], 0)
+      const quadrantCover = covered.filter((coveredNumber) => getTableQuadrant(coveredNumber) === regionIndex)
+        .length
+      const direct = probabilities[number]
+      const score = mass * 0.68 + direct * 2.8 + (quadrantCover / covered.length) * 0.16
+
+      return {
+        number,
+        score,
+      }
+    })
+    .sort((left, right) => right.score - left.score)
+
+  return {
+    candidates: candidates.slice(0, 4).map((candidate) => candidate.number),
+    center: candidates[0]?.number ?? numbers[0],
+    numbers,
+    region: regionIndex + 1,
+    weight: signal.weights[regionIndex],
+  }
+}
+
 function circularHarmonic(numbers, harmonic) {
   let real = 0
   let imaginary = 0
@@ -1903,6 +2044,7 @@ function findSmartCoverage(probabilities) {
 function findLandingCoverage(probabilities, history, fixedSpan = FIXED_SPAN) {
   const evidenceFactor = clamp(history.length / 80, 0.35, 1)
   const regionalField = buildRegionalField(history)
+  const tableSignal = buildTableQuadrantSignal(history)
   let best = null
 
   WHEEL_ORDER.forEach((center) => {
@@ -1927,6 +2069,13 @@ function findLandingCoverage(probabilities, history, fixedSpan = FIXED_SPAN) {
     const coreLift = coreMass / coreBaseline - 1
     const fieldAgreement = fieldMass / Math.max(baseline, 0.0001)
     const rimGap = coreMass / core.length - (mass - coreMass) / Math.max(covered.length - core.length, 1)
+    const centerQuadrant = getTableQuadrant(center)
+    const tableCenterLift = centerQuadrant >= 0 ? tableSignal.weights[centerQuadrant] / 0.25 - 1 : 0
+    const tableCoverage =
+      covered.reduce((sum, number) => {
+        const quadrant = getTableQuadrant(number)
+        return sum + (quadrant >= 0 ? tableSignal.weights[quadrant] : 0.05)
+      }, 0) / covered.length
     const pressure =
       Math.max(lift, 0) * 0.14 +
       Math.max(coreLift, 0) * 0.17 +
@@ -1937,7 +2086,9 @@ function findLandingCoverage(probabilities, history, fixedSpan = FIXED_SPAN) {
       Math.max(contrast, 0) * NUMBER_COUNT * 0.22 +
       Math.max(rimGap, 0) * NUMBER_COUNT * 0.08 +
       fieldAgreement * 0.08 +
-      regionalField.concentration * 0.08
+      regionalField.concentration * 0.08 +
+      Math.max(tableCenterLift, 0) * 0.14 +
+      tableCoverage * 0.12
     const score =
       (roiEstimate * 0.42 + baselineGap * 0.9 + breakEvenGap * 1.55 + pressure) * evidenceFactor
 
@@ -1957,6 +2108,8 @@ function findLandingCoverage(probabilities, history, fixedSpan = FIXED_SPAN) {
         fieldAgreement: clamp(fieldAgreement, 0, 1.8),
         projectedNumber: regionalField.projectedNumber,
         rimGap,
+        tableCoverage,
+        tableLift: tableCenterLift,
         score,
       }
     }
@@ -1978,6 +2131,8 @@ function findLandingCoverage(probabilities, history, fixedSpan = FIXED_SPAN) {
       fieldAgreement: 0,
       projectedNumber: regionalField.projectedNumber,
       rimGap: 0,
+      tableCoverage: 0,
+      tableLift: 0,
       score: 0,
     }
   )
@@ -2088,6 +2243,14 @@ function normalize(values) {
   return values.map((value) => Math.max(value, 0) / sum)
 }
 
+function normalizeToLength(values) {
+  const sum = values.reduce((total, value) => total + Math.max(value, 0), 0)
+  if (!sum) {
+    return values.map(() => 1 / values.length)
+  }
+  return values.map((value) => Math.max(value, 0) / sum)
+}
+
 function softmax(values, temperature) {
   const max = Math.max(...values)
   const exps = values.map((value) => Math.exp((value - max) * temperature))
@@ -2109,6 +2272,18 @@ function getNumberColor(number) {
     return 'green'
   }
   return RED_NUMBERS.has(number) ? 'red' : 'black'
+}
+
+function getTableQuadrant(number) {
+  if (number < 1 || number > 36) {
+    return -1
+  }
+  return Math.floor((number - 1) / 9)
+}
+
+function getTableQuadrantState(number) {
+  const quadrant = getTableQuadrant(number)
+  return quadrant >= 0 ? quadrant : 4
 }
 
 function circularDistance(left, right, length) {
