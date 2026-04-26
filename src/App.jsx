@@ -88,6 +88,12 @@ const AGENTS = [
     predict: predictLandingZone,
   },
   {
+    id: 'antiMiss',
+    name: 'Anti-miss',
+    signal: 'setor que teria capturado perdas recentes',
+    predict: predictAntiMiss,
+  },
+  {
     id: 'seed',
     name: 'Seed do print',
     signal: 'graficos iniciais da mesa',
@@ -176,7 +182,6 @@ function App() {
       actual: parsed,
       span: FIXED_SPAN,
       unit: savedState.unit,
-      historyLength: history.length,
     })
 
     const separator = savedState.historyText.trim() ? ', ' : ''
@@ -297,7 +302,7 @@ function App() {
           <div className="metric-strip">
             <Metric label="Historico" value={history.length} />
             <Metric label="Paper 10" value={`${Math.min(savedState.paperLog.length, 10)}/10`} />
-            <Metric label="Juiz" value={formatPercent(population.recommendation.judge.score)} />
+            <Metric label="Medidor" value={formatPercent(population.recommendation.judge.score)} />
             <Metric label="Backtest" value={formatMoney(backtest.net)} />
           </div>
         </section>
@@ -372,7 +377,7 @@ function App() {
 
               <div className="smart-card smart-card--judge">
                 <div>
-                  <span>Juiz MiroFish</span>
+                  <span>Medidor MiroFish</span>
                   <strong>
                     {population.recommendation.judge.label} / Campeao{' '}
                     {population.recommendation.judge.championName}
@@ -603,8 +608,8 @@ function App() {
               <span style={{ width: `${Math.min(savedState.paperLog.length, 10) * 10}%` }} />
             </div>
             <p className="risk-note">
-              Use as primeiras 10 rodadas como ensaio de fluxo. So conte como entrada quando o
-              painel disser jogar; o restante fica registrado como nao jogo.
+              Modo ataque continuo: toda rodada lancada conta como entrada. O medidor mostra risco,
+              mas nao bloqueia o setor sugerido.
             </p>
             <div className="audit-list">
               <div>
@@ -612,12 +617,12 @@ function App() {
                 <strong>{paperSummary.bets}</strong>
               </div>
               <div>
-                <span>Evitou perdas</span>
-                <strong>{paperSummary.avoidedLosses}</strong>
+                <span>Taxa acerto</span>
+                <strong>{formatPercent(paperSummary.bets ? paperSummary.wins / paperSummary.bets : 0)}</strong>
               </div>
               <div>
-                <span>Perdeu chances</span>
-                <strong>{paperSummary.missedChances}</strong>
+                <span>Media rodada</span>
+                <strong>{formatMoney(paperSummary.bets ? paperSummary.net / paperSummary.bets : 0)}</strong>
               </div>
             </div>
             <div className="paper-log">
@@ -663,7 +668,7 @@ function App() {
             <div className="paper-score">
               <Metric label="Apostas" value={backtest.bets} />
               <Metric label="Acertos" value={backtest.wins} />
-              <Metric label="Nao jogos" value={backtest.skips} />
+              <Metric label="Cobertura" value={`${FIXED_COVERAGE} nums`} />
               <Metric label="ROI" value={formatSignedPercent(backtest.roi)} />
             </div>
             <div className="audit-list">
@@ -1033,24 +1038,16 @@ function buildPopulation(history, span = FIXED_SPAN, seedDistribution = null, op
         preliminaryAllow,
         roiEstimate,
       })
-  const mode = judge.allow ? 'bet' : 'hold'
-  const decision =
-    mode === 'bet'
-      ? {
-          label: `JOGUE AGORA: ${center} +${activeSpan}`,
-          tone: 'play',
-        }
-      : {
-          label: 'NAO JOGUE AGORA',
-          tone: 'skip',
-        }
+  const mode = 'bet'
+  const decision = {
+    label: `JOGUE AGORA: ${center} +${activeSpan}`,
+    tone: 'play',
+  }
 
   const message =
-    mode === 'bet'
-      ? `Populacao inclinada para ${leader.name}. ${judge.reason}`
-      : history.length < 10
-        ? 'Carregue pelo menos 10 giros para liberar decisao de jogo.'
-        : judge.reason
+    history.length < 10
+      ? `Ataque continuo liberado. Ainda com poucos giros, lider: ${leader.name}.`
+      : `Ataque continuo. Lider: ${leader.name}. ${judge.reason}`
 
   return {
     probabilities: stabilized,
@@ -1179,7 +1176,7 @@ function buildJudge({
     championRoi: champion.roi,
     confidence,
     hitRate,
-    label: allow ? 'APROVADO' : 'BLOQUEADO',
+    label: allow ? 'FORTE' : 'RISCO',
     modelRoi,
     predictedMean,
     reason,
@@ -1213,7 +1210,7 @@ function buildShadowJudge({
     championRoi: roiEstimate,
     confidence,
     hitRate: history.length ? mass : 0,
-    label: preliminaryAllow ? 'PRE-APROVADO' : 'BLOQUEADO',
+    label: preliminaryAllow ? 'FORTE' : 'RISCO',
     modelRoi: roiEstimate,
     predictedMean: mass,
     reason: reason || (preliminaryAllow ? 'Pre-filtro matematico positivo.' : 'Pre-filtro matematico abaixo do corte.'),
@@ -1302,24 +1299,24 @@ function explainJudge({
   stability,
 }) {
   if (allow) {
-    return `Juiz aprovou: probabilidade calibrada acima do breakeven e mesa estavel.`
+    return `Medidor forte: probabilidade calibrada acima do breakeven e mesa estavel.`
   }
   if (!preliminaryAllow) {
-    return 'Juiz bloqueou: os sinais brutos ainda nao passaram o pre-filtro.'
+    return 'Risco alto: sinais brutos abaixo do pre-filtro, mas o ataque segue no melhor setor.'
   }
   if (calibratedProbability < BREAK_EVEN_PROBABILITY + 0.006) {
-    return `Juiz bloqueou: calibrado ${formatPercent(calibratedProbability)} fica perto do breakeven.`
+    return `Risco alto: calibrado ${formatPercent(calibratedProbability)} fica perto do breakeven.`
   }
   if (stability < 0.34) {
-    return 'Juiz bloqueou: mudanca recente na mesa reduziu confianca.'
+    return 'Risco alto: mudanca recente na mesa reduziu confianca.'
   }
   if (championGap < -0.18) {
-    return `Juiz bloqueou: ${champion.name} esta performando melhor no walk-forward.`
+    return `Risco alto: ${champion.name} esta performando melhor no walk-forward.`
   }
   if (judgeScore < 0.52) {
-    return 'Juiz bloqueou: placar combinado ainda nao compensa o risco do +9.'
+    return 'Risco alto: placar combinado ainda nao compensa o risco do +9.'
   }
-  return 'Juiz bloqueou: evidencia insuficiente para entrada.'
+  return 'Risco alto: evidencia fraca, usar ficha baixa no ataque continuo.'
 }
 
 function calculateRegimeStability(history) {
@@ -1347,15 +1344,6 @@ function buildWheelProfile(numbers) {
   })
 
   return normalize(scores)
-}
-
-function quickBacktestGate(recommendation, history) {
-  return (
-    recommendation.preliminaryAllow &&
-    recommendation.mass >= BREAK_EVEN_PROBABILITY + 0.004 &&
-    recommendation.confidence >= 0.35 &&
-    calculateRegimeStability(history) >= 0.3
-  )
 }
 
 function runBacktest(history, span, unit, seedDistribution = null) {
@@ -1386,7 +1374,7 @@ function runBacktest(history, span, unit, seedDistribution = null) {
     const prefix = history.slice(0, index)
     const actual = history[index]
     const recommendation = buildPopulation(prefix, span, seedDistribution, { withJudge: false }).recommendation
-    const shouldBet = quickBacktestGate(recommendation, prefix)
+    const shouldBet = true
     const covered = recommendation.covered
     const randomCenter = WHEEL_ORDER[index % WHEEL_ORDER.length]
     const randomCovered = getCoveredNumbers(randomCenter, span)
@@ -1419,8 +1407,8 @@ function runBacktest(history, span, unit, seedDistribution = null) {
   }
 }
 
-function settlePaperRound({ recommendation, actual, span, unit, historyLength }) {
-  const action = historyLength >= 10 && recommendation.mode === 'bet' ? 'bet' : 'skip'
+function settlePaperRound({ recommendation, actual, span, unit }) {
+  const action = 'bet'
   const covered = recommendation.covered
   const activeSpan = recommendation.activeSpan ?? span
   const wouldNet = settleRoulette(covered, actual, unit)
@@ -1691,6 +1679,43 @@ function predictLandingZone(history) {
   return normalize(scores)
 }
 
+function predictAntiMiss(history) {
+  const scores = Array(NUMBER_COUNT).fill(0.16)
+  if (!history.length) {
+    return normalize(scores)
+  }
+
+  const recent = history.slice(-90)
+  const short = history.slice(-34)
+
+  recent.forEach((number, index) => {
+    const position = WHEEL_ORDER.indexOf(number)
+    const recency = 0.35 + (index + 1) / recent.length
+    addWheelKernel(scores, position, recency * 0.72, 4.1)
+  })
+
+  WHEEL_ORDER.forEach((center) => {
+    const sector = getCoveredNumbers(center, FIXED_SPAN)
+    const core = getCoveredNumbers(center, 4)
+    const longHits = recent.filter((number) => sector.includes(number)).length / recent.length
+    const shortHits = short.length
+      ? short.filter((number) => sector.includes(number)).length / short.length
+      : longHits
+    const coreHits = recent.filter((number) => core.includes(number)).length / recent.length
+    const memory = measureFixedSectorMemory(history, center, FIXED_SPAN)
+    const pressure =
+      shortHits * 2.2 +
+      longHits * 1.25 +
+      coreHits * 0.9 +
+      Math.max(memory.shortLift, 0) * 0.7 +
+      Math.max(memory.lift, 0) * 0.45
+
+    addWheelKernel(scores, WHEEL_ORDER.indexOf(center), pressure, 3.8)
+  })
+
+  return normalize(scores)
+}
+
 function addWheelKernel(scores, position, weight, radius) {
   WHEEL_ORDER.forEach((number, wheelIndex) => {
     const distance = circularDistance(position, wheelIndex, WHEEL_ORDER.length)
@@ -1907,6 +1932,8 @@ function findLandingCoverage(probabilities, history, fixedSpan = FIXED_SPAN) {
       Math.max(coreLift, 0) * 0.17 +
       Math.max(memory.lift, 0) * 0.18 +
       Math.max(memory.shortLift, 0) * 0.1 +
+      memory.shortRate * 0.32 +
+      memory.posteriorRate * 0.18 +
       Math.max(contrast, 0) * NUMBER_COUNT * 0.22 +
       Math.max(rimGap, 0) * NUMBER_COUNT * 0.08 +
       fieldAgreement * 0.08 +
@@ -1926,6 +1953,7 @@ function findLandingCoverage(probabilities, history, fixedSpan = FIXED_SPAN) {
         coreLift,
         memoryLift: memory.lift,
         memoryRate: memory.posteriorRate,
+        shortRate: memory.shortRate,
         fieldAgreement: clamp(fieldAgreement, 0, 1.8),
         projectedNumber: regionalField.projectedNumber,
         rimGap,
@@ -1946,6 +1974,7 @@ function findLandingCoverage(probabilities, history, fixedSpan = FIXED_SPAN) {
       coreLift: 0,
       memoryLift: 0,
       memoryRate: 0,
+      shortRate: 0,
       fieldAgreement: 0,
       projectedNumber: regionalField.projectedNumber,
       rimGap: 0,
@@ -1983,6 +2012,7 @@ function measureFixedSectorMemory(history, center, span) {
   return {
     posteriorRate,
     lift: posteriorRate / baseline - 1,
+    shortRate,
     shortLift: shortRate / baseline - 1,
   }
 }
