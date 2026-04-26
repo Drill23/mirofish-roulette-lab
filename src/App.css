@@ -516,6 +516,11 @@ input[type='range'] {
   background: linear-gradient(135deg, rgba(255, 255, 255, 0.08), rgba(120, 170, 255, 0.055));
 }
 
+.smart-card--shadow {
+  border-color: rgba(170, 120, 255, 0.28);
+  background: linear-gradient(135deg, rgba(170, 120, 255, 0.1), rgba(255, 255, 255, 0.035));
+}
+
 .section-title {
   display: flex;
   align-items: center;

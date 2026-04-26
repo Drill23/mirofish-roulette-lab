@@ -156,6 +156,7 @@ const DEFAULT_STATE = {
     columns: ['', '', ''],
   },
   paperLog: [],
+  shadowLog: [],
 }
 
 function App() {
@@ -188,6 +189,7 @@ function App() {
   )
   const lastTen = history.slice(-10).reverse()
   const paperSummary = summarizePaper(savedState.paperLog)
+  const shadowSummary = summarizeShadow(savedState.shadowLog ?? [])
   const lastOutcome = savedState.paperLog[0] ?? null
 
   function updateState(patch) {
@@ -222,11 +224,17 @@ function App() {
       span: FIXED_SPAN,
       unit: savedState.unit,
     })
+    const shadowEntry = settleShadowRound({
+      actual: parsed,
+      recommendation: population.recommendation,
+      span: FIXED_SPAN,
+    })
 
     const separator = savedState.historyText.trim() ? ', ' : ''
     updateState({
       historyText: `${savedState.historyText.trim()}${separator}${parsed}`,
       paperLog: [paperEntry, ...savedState.paperLog].slice(0, 100),
+      shadowLog: [shadowEntry, ...(savedState.shadowLog ?? [])].slice(0, 120),
     })
     setNextNumber('')
   }
@@ -236,6 +244,7 @@ function App() {
       historyText:
         '15, 27, 25, 18, 28, 9, 6, 32, 36, 19, 19, 4, 21, 2, 25, 17, 34, 6, 27, 13, 36, 11, 30, 8, 23, 10, 5, 24, 16, 33, 1, 20, 14, 31, 9, 22, 18, 29, 7, 28, 12, 35, 3, 26, 0, 32, 15, 19, 4, 21',
       paperLog: [],
+      shadowLog: [],
     })
   }
 
@@ -515,6 +524,23 @@ function App() {
                 </p>
               </div>
 
+              <div className="smart-card smart-card--shadow">
+                <div>
+                  <span>Mesa Sombra</span>
+                  <strong>
+                    Sugere {population.recommendation.shadowRoulette.center} +{FIXED_SPAN} / placar{' '}
+                    {shadowSummary.agentWins} x {shadowSummary.shadowWins}
+                  </strong>
+                </div>
+                <p>
+                  Bola virtual gira {population.recommendation.shadowRoulette.rotations.toFixed(2)} voltas e
+                  cairia em {population.recommendation.shadowRoulette.landedNumber}. Cobertura{' '}
+                  {population.recommendation.shadowRoulette.covered.join(', ')}. Agentes{' '}
+                  {formatPercent(shadowSummary.agentRate)} vs Mesa Sombra{' '}
+                  {formatPercent(shadowSummary.shadowRate)} em {shadowSummary.rounds} rodadas.
+                </p>
+              </div>
+
               <div className="section-title">
                 <span>Historico</span>
                 <div>
@@ -636,6 +662,7 @@ function App() {
                     seedFields: seedToFields(parseSeedText(SAMPLE_SEED_TEXT)),
                     historyText: parseSeedText(SAMPLE_SEED_TEXT).lastNumbers.join(', '),
                     paperLog: [],
+                    shadowLog: [],
                   })
                 }}
                 type="button"
@@ -717,7 +744,7 @@ function App() {
           <article className="paper-card">
             <div className="section-title">
               <span>Paper test</span>
-              <button onClick={() => updateState({ paperLog: [] })} type="button">
+              <button onClick={() => updateState({ paperLog: [], shadowLog: [] })} type="button">
                 Zerar
               </button>
             </div>
@@ -807,6 +834,51 @@ function App() {
                 <span>Maior queda</span>
                 <strong>{formatMoney(backtest.drawdown)}</strong>
               </div>
+            </div>
+          </article>
+
+          <article className="paper-card">
+            <div className="section-title">
+              <span>Placar Mesa Sombra</span>
+            </div>
+            <div className="paper-score">
+              <Metric label="Rodadas" value={shadowSummary.rounds} />
+              <Metric label="Agentes" value={shadowSummary.agentWins} />
+              <Metric label="Sombra" value={shadowSummary.shadowWins} />
+              <Metric label="Exato" value={shadowSummary.exactWins} />
+            </div>
+            <div className="audit-list">
+              <div>
+                <span>Taxa agentes</span>
+                <strong>{formatPercent(shadowSummary.agentRate)}</strong>
+              </div>
+              <div>
+                <span>Taxa sombra</span>
+                <strong>{formatPercent(shadowSummary.shadowRate)}</strong>
+              </div>
+              <div>
+                <span>Ambos ganharam</span>
+                <strong>{shadowSummary.bothWins}</strong>
+              </div>
+            </div>
+            <div className="paper-log">
+              {(savedState.shadowLog ?? []).length ? (
+                (savedState.shadowLog ?? []).slice(0, 10).map((entry) => (
+                  <div className="paper-row" key={entry.id}>
+                    <span className={entry.agentHit ? 'hit' : 'miss'}>
+                      {entry.agentHit ? 'Agente' : 'Falhou'}
+                    </span>
+                    <strong>
+                      A {entry.agentCenter} / S {entry.shadowCenter} caiu {entry.actual}
+                    </strong>
+                    <em className={entry.shadowHit ? 'hit' : 'miss'}>
+                      {entry.shadowHit ? 'Sombra ganhou' : 'Sombra perdeu'}
+                    </em>
+                  </div>
+                ))
+              ) : (
+                <small>O placar aparece depois de lancar rodadas reais.</small>
+              )}
             </div>
           </article>
         </section>
@@ -1189,6 +1261,7 @@ function buildPopulation(history, span = FIXED_SPAN, seedDistribution = null, op
     stabilized.map((value, number) => value * 0.74 + virtualPopulation.probabilities[number] * 0.26),
   )
   const conformalSet = buildFastConformalSet(modelHistory, stabilized, 0.1)
+  const shadowRoulette = buildShadowRoulette(modelHistory, stabilized, span)
   const activeSpan = span
   const baseLandingCoverage = findLandingCoverage(stabilized, modelHistory, activeSpan)
   const tableQuadrant = analyzeTableQuadrant(modelHistory, stabilized, activeSpan)
@@ -1301,6 +1374,7 @@ function buildPopulation(history, span = FIXED_SPAN, seedDistribution = null, op
       hunterProfile,
       virtualPopulation,
       conformalSet,
+      shadowRoulette,
       adaptiveLeader: adaptiveLeader.name,
       adaptiveLeaderHitRate: adaptiveLeader.adaptive?.hitRate ?? 0,
       activeSpan,
@@ -1647,6 +1721,45 @@ function buildFastConformalSet(history, probabilities, alpha = 0.1) {
       : `Para 90% calibrado seriam necessarios ${set.length} numeros; quando passa de ${FIXED_COVERAGE}, a leitura fica difusa.`,
     set,
     size: set.length,
+  }
+}
+
+function buildShadowRoulette(history, probabilities, span) {
+  const last = history.at(-1) ?? 0
+  const previous = history.at(-2) ?? last
+  const lastPosition = WHEEL_ORDER.indexOf(last)
+  const previousPosition = WHEEL_ORDER.indexOf(previous)
+  const seed = `${history.length}:${history.slice(-12).join('-')}`
+  const launchNoise = deterministicNoise(`${seed}:launch`)
+  const dragNoise = deterministicNoise(`${seed}:drag`)
+  const scatterNoise = deterministicNoise(`${seed}:scatter`)
+  const rotorNoise = deterministicNoise(`${seed}:rotor`)
+  const rotations = 9 + launchNoise
+  const observedDrift = signedCircularOffset(lastPosition - previousPosition, WHEEL_ORDER.length)
+  const rotorDrift = observedDrift * 0.18 + (rotorNoise - 0.5) * 4.8
+  const ballTravel = rotations * WHEEL_ORDER.length
+  const dragLoss = (0.78 + dragNoise * 0.44) * rotations
+  const scatter = Math.round((scatterNoise - 0.5) * 10)
+  const rawPosition = mod(
+    Math.round(lastPosition + ballTravel - rotorDrift - dragLoss + scatter),
+    WHEEL_ORDER.length,
+  )
+  const landedNumber = WHEEL_ORDER[rawPosition]
+  const neighbors = getCoveredNumbers(landedNumber, span)
+  const pressureCenter = findBestCenter(probabilities, span)
+  const pressureCovered = getCoveredNumbers(pressureCenter, span)
+  const landedMass = neighbors.reduce((sum, number) => sum + probabilities[number], 0)
+  const pressureMass = pressureCovered.reduce((sum, number) => sum + probabilities[number], 0)
+  const center = pressureMass > landedMass * 1.08 ? pressureCenter : landedNumber
+  const covered = getCoveredNumbers(center, span)
+
+  return {
+    ballPosition: rawPosition,
+    center,
+    covered,
+    landedNumber,
+    pressureCenter,
+    rotations,
   }
 }
 
@@ -2128,6 +2241,44 @@ function settlePaperRound({ recommendation, actual, span, unit }) {
     wouldNet,
     confidence: recommendation.confidence,
     roiEstimate: recommendation.roiEstimate,
+  }
+}
+
+function settleShadowRound({ actual, recommendation, span }) {
+  const shadow = recommendation.shadowRoulette
+  const shadowCovered = shadow?.covered ?? getCoveredNumbers(shadow?.center ?? 0, span)
+  const agentCovered = recommendation.covered
+
+  return {
+    actual,
+    agentCenter: recommendation.center,
+    agentCovered,
+    agentHit: agentCovered.includes(actual),
+    id: `${Date.now()}-shadow-${actual}-${Math.random().toString(16).slice(2)}`,
+    rotations: shadow?.rotations ?? 9,
+    shadowCenter: shadow?.center ?? 0,
+    shadowCovered,
+    shadowExact: shadow?.landedNumber === actual,
+    shadowHit: shadowCovered.includes(actual),
+    shadowLanded: shadow?.landedNumber ?? shadow?.center ?? 0,
+  }
+}
+
+function summarizeShadow(log) {
+  const rounds = log.length
+  const agentWins = log.filter((entry) => entry.agentHit).length
+  const shadowWins = log.filter((entry) => entry.shadowHit).length
+  const bothWins = log.filter((entry) => entry.agentHit && entry.shadowHit).length
+  const exactWins = log.filter((entry) => entry.shadowExact).length
+
+  return {
+    agentRate: rounds ? agentWins / rounds : 0,
+    agentWins,
+    bothWins,
+    exactWins,
+    rounds,
+    shadowRate: rounds ? shadowWins / rounds : 0,
+    shadowWins,
   }
 }
 
