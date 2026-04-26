@@ -227,7 +227,7 @@ button {
 
 .field-row {
   display: grid;
-  grid-template-columns: 1.25fr 0.82fr 0.7fr 0.7fr;
+  grid-template-columns: 1.25fr 0.7fr 0.7fr;
   gap: 14px;
 }
 
@@ -242,6 +242,35 @@ label {
 label span {
   color: #f2cf72;
   font-size: 0.8rem;
+}
+
+.locked-field {
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  min-height: 78px;
+  padding: 12px;
+  border: 1px solid rgba(242, 207, 114, 0.22);
+  border-radius: 8px;
+  background: rgba(242, 207, 114, 0.08);
+}
+
+.locked-field span {
+  color: rgba(245, 241, 232, 0.64);
+  font-size: 0.76rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.locked-field strong {
+  color: #f2cf72;
+  font-size: 1.55rem;
+  line-height: 1;
+}
+
+.locked-field small {
+  color: rgba(245, 241, 232, 0.62);
 }
 
 input,
@@ -266,13 +295,6 @@ input[type='number'] {
 }
 
 input[type='range'] {
-  accent-color: #f2cf72;
-}
-
-.toggle-field input {
-  width: 22px;
-  height: 22px;
-  margin: 5px 0 0;
   accent-color: #f2cf72;
 }
 

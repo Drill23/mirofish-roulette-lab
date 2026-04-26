@@ -18,6 +18,8 @@ const RED_NUMBERS = new Set([
 
 const NUMBER_COUNT = 37
 const UNIFORM_PROBABILITY = 1 / NUMBER_COUNT
+const FIXED_SPAN = 9
+const FIXED_COVERAGE = FIXED_SPAN * 2 + 1
 const STORAGE_KEY = 'mirofish-roulette-lab:v1'
 const SAMPLE_SEED_TEXT =
   'vermelho 47 preto 13 verde 1 pares 47 impares 13 1-18 46 19-36 14 duzias 30 34 32 colunas 31 34 31 ultimos 31 3 34 10 11 33 29 17 3 25 23'
@@ -99,8 +101,7 @@ const AGENTS = [
 
 const DEFAULT_STATE = {
   historyText: '',
-  span: 2,
-  autoRegion: true,
+  span: FIXED_SPAN,
   unit: 0.5,
   bankroll: 100,
   seedText: '',
@@ -127,19 +128,12 @@ function App() {
   )
   const seedDistribution = useMemo(() => buildSeedDistribution(seed), [seed])
   const population = useMemo(
-    () => buildPopulation(history, savedState.span, seedDistribution, savedState.autoRegion ?? true),
-    [history, savedState.span, seedDistribution, savedState.autoRegion],
+    () => buildPopulation(history, FIXED_SPAN, seedDistribution),
+    [history, seedDistribution],
   )
   const backtest = useMemo(
-    () =>
-      runBacktest(
-        history,
-        savedState.span,
-        savedState.unit,
-        seedDistribution,
-        savedState.autoRegion ?? true,
-      ),
-    [history, savedState.span, savedState.unit, seedDistribution, savedState.autoRegion],
+    () => runBacktest(history, FIXED_SPAN, savedState.unit, seedDistribution),
+    [history, savedState.unit, seedDistribution],
   )
   const wheelCells = useMemo(
     () => buildWheelCells(population.recommendation.covered),
@@ -178,7 +172,7 @@ function App() {
     const paperEntry = settlePaperRound({
       recommendation: population.recommendation,
       actual: parsed,
-      span: savedState.span,
+      span: FIXED_SPAN,
       unit: savedState.unit,
       historyLength: history.length,
     })
@@ -251,26 +245,11 @@ function App() {
           {lastOutcome && <OutcomeBanner entry={lastOutcome} />}
 
           <div className="field-row">
-            <label>
-              Vizinhos
-              <input
-                max="9"
-                min="0"
-                onChange={(event) => updateState({ span: Number(event.target.value) })}
-                type="range"
-                value={savedState.span}
-              />
-              <span>{savedState.span} para cada lado</span>
-            </label>
-            <label className="toggle-field">
-              Regiao auto
-              <input
-                checked={savedState.autoRegion ?? true}
-                onChange={(event) => updateState({ autoRegion: event.target.checked })}
-                type="checkbox"
-              />
-              <span>{savedState.autoRegion ?? true ? 'modelo escolhe' : 'slider manda'}</span>
-            </label>
+            <div className="locked-field">
+              <span>Vizinhos fixos</span>
+              <strong>+{FIXED_SPAN}</strong>
+              <small>{FIXED_COVERAGE} numeros cobertos por entrada</small>
+            </div>
             <label>
               Ficha
               <input
@@ -382,9 +361,10 @@ function App() {
                 <p>
                   Região {population.recommendation.landingNumbers.join(', ')}. Consenso{' '}
                   {formatPercent(population.recommendation.consensus)}. Lift regional{' '}
-                  {formatSignedPercent(population.recommendation.landingLift)}. Confiança{' '}
-                  {formatPercent(population.recommendation.confidence)}.{' '}
-                  {savedState.autoRegion ?? true ? 'Usando região automática.' : 'Usando slider manual.'}
+                  {formatSignedPercent(population.recommendation.landingLift)}. Nucleo{' '}
+                  {formatSignedPercent(population.recommendation.landingCoreLift)}. Memoria{' '}
+                  {formatSignedPercent(population.recommendation.landingMemoryLift)}. Confiança{' '}
+                  {formatPercent(population.recommendation.confidence)}. +{FIXED_SPAN} fixo.
                 </p>
               </div>
 
@@ -923,7 +903,7 @@ function buildSeedDistribution(seed) {
   return smoothOnWheel(scores, 0.35)
 }
 
-function buildPopulation(history, span, seedDistribution = null, autoRegion = true) {
+function buildPopulation(history, span = FIXED_SPAN, seedDistribution = null) {
   const scores = Object.fromEntries(AGENTS.map((agent) => [agent.id, 0]))
   const context = { seedDistribution }
 
@@ -963,10 +943,10 @@ function buildPopulation(history, span, seedDistribution = null, autoRegion = tr
     ),
   )
   const stabilized = normalize(combined.map((value) => value * 0.94 + UNIFORM_PROBABILITY * 0.06))
-  const landingCoverage = findLandingCoverage(stabilized, history)
-  const activeSpan = autoRegion ? landingCoverage.span : span
-  const center = autoRegion ? landingCoverage.center : findBestCenter(stabilized, span)
-  const covered = getCoveredNumbers(center, activeSpan)
+  const activeSpan = span
+  const landingCoverage = findLandingCoverage(stabilized, history, activeSpan)
+  const center = landingCoverage.center
+  const covered = landingCoverage.covered
   const mass = covered.reduce((sum, number) => sum + stabilized[number], 0)
   const baseline = covered.length / NUMBER_COUNT
   const breakEven = covered.length / 36
@@ -977,7 +957,9 @@ function buildPopulation(history, span, seedDistribution = null, autoRegion = tr
   const regionalQuality = clamp(
     Math.max(landingCoverage.lift, 0) * 0.45 +
       Math.max(landingCoverage.contrast, 0) * NUMBER_COUNT * 0.7 +
-      landingCoverage.fieldAgreement * 0.25,
+      landingCoverage.fieldAgreement * 0.22 +
+      Math.max(landingCoverage.coreLift, 0) * 0.24 +
+      Math.max(landingCoverage.memoryLift, 0) * 0.2,
     0,
     1,
   )
@@ -992,9 +974,10 @@ function buildPopulation(history, span, seedDistribution = null, autoRegion = tr
     roiEstimate * 0.5 +
     confidence * 0.3 +
     Math.max(landingCoverage.lift, 0) * 0.14 +
-    landingCoverage.fieldAgreement * 0.08
+    landingCoverage.fieldAgreement * 0.08 +
+    Math.max(landingCoverage.memoryLift, 0) * 0.09
   const mode =
-    history.length >= 10 && roiEstimate >= 0.025 && confidence >= 0.38 && playScore >= 0.17
+    history.length >= 10 && roiEstimate >= 0.018 && confidence >= 0.36 && playScore >= 0.16
       ? 'bet'
       : 'hold'
   const decision =
@@ -1010,10 +993,10 @@ function buildPopulation(history, span, seedDistribution = null, autoRegion = tr
 
   const message =
     mode === 'bet'
-      ? `Populacao inclinada para ${leader.name}. A regiao passou o corte binario.`
+      ? `Populacao inclinada para ${leader.name}. Setor +${activeSpan} passou o corte fixo.`
       : history.length < 10
         ? 'Carregue pelo menos 10 giros para liberar decisao de jogo.'
-        : 'Sinal regional abaixo do corte. Nao jogar agora.'
+        : `Setor +${activeSpan} abaixo do corte matematico. Nao jogar agora.`
 
   return {
     probabilities: stabilized,
@@ -1038,8 +1021,11 @@ function buildPopulation(history, span, seedDistribution = null, autoRegion = tr
       landingLift: landingCoverage.lift,
       landingContrast: landingCoverage.contrast,
       landingFieldAgreement: landingCoverage.fieldAgreement,
+      landingCoreLift: landingCoverage.coreLift,
+      landingMemoryLift: landingCoverage.memoryLift,
+      landingRimGap: landingCoverage.rimGap,
       activeSpan,
-      autoRegion,
+      fixedSpan: true,
       mass,
       mode,
       message,
@@ -1052,7 +1038,7 @@ function buildPopulation(history, span, seedDistribution = null, autoRegion = tr
   }
 }
 
-function runBacktest(history, span, unit, seedDistribution = null, autoRegion = true) {
+function runBacktest(history, span, unit, seedDistribution = null) {
   if (history.length < 12) {
     return {
       bets: 0,
@@ -1079,7 +1065,7 @@ function runBacktest(history, span, unit, seedDistribution = null, autoRegion = 
   for (let index = 10; index < history.length; index += 1) {
     const prefix = history.slice(0, index)
     const actual = history[index]
-    const recommendation = buildPopulation(prefix, span, seedDistribution, autoRegion).recommendation
+    const recommendation = buildPopulation(prefix, span, seedDistribution).recommendation
     const shouldBet = recommendation.mode === 'bet'
     const covered = recommendation.covered
     const randomCenter = WHEEL_ORDER[index % WHEEL_ORDER.length]
@@ -1559,74 +1545,116 @@ function findSmartCoverage(probabilities) {
   return best
 }
 
-function findLandingCoverage(probabilities, history) {
+function findLandingCoverage(probabilities, history, fixedSpan = FIXED_SPAN) {
   const evidenceFactor = clamp(history.length / 80, 0.35, 1)
   const regionalField = buildRegionalField(history)
   let best = null
 
-  for (let span = 2; span <= 9; span += 1) {
-    WHEEL_ORDER.forEach((center) => {
-      const covered = getCoveredNumbers(center, span)
-      const outerRing = getOuterRingNumbers(center, span, Math.min(span + 3, 12))
-      const mass = covered.reduce((sum, number) => sum + probabilities[number], 0)
-      const outerMass = outerRing.reduce((sum, number) => sum + probabilities[number], 0)
-      const fieldMass = covered.reduce(
-        (sum, number) => sum + regionalField.probabilities[number],
-        0,
-      )
-      const roiEstimate = estimateRoi(mass, covered.length)
-      const baselineGap = mass - covered.length / NUMBER_COUNT
-      const breakEvenGap = mass - covered.length / 36
-      const insideAverage = mass / covered.length
-      const outsideAverage = outerRing.length ? outerMass / outerRing.length : UNIFORM_PROBABILITY
-      const contrast = insideAverage - outsideAverage
-      const lift = insideAverage / UNIFORM_PROBABILITY - 1
-      const fieldAgreement = fieldMass / Math.max(covered.length / NUMBER_COUNT, 0.0001)
-      const compactBonus = 1 / Math.sqrt(covered.length)
-      const spanPenalty = Math.abs(span - 3) * 0.012
-      const score =
-        (roiEstimate * 0.5 +
-          baselineGap * 1.1 +
-          breakEvenGap * 1.9 +
-          Math.max(contrast, 0) * NUMBER_COUNT * 0.28 +
-          Math.max(lift, 0) * 0.06 +
-          fieldAgreement * 0.08 +
-          regionalField.concentration * 0.09 +
-          compactBonus * 0.06) *
-          evidenceFactor -
-        spanPenalty
+  WHEEL_ORDER.forEach((center) => {
+    const covered = getCoveredNumbers(center, fixedSpan)
+    const coreSpan = Math.max(2, Math.floor(fixedSpan / 2))
+    const core = getCoveredNumbers(center, coreSpan)
+    const outerRing = getOuterRingNumbers(center, fixedSpan, Math.min(fixedSpan + 4, 18))
+    const mass = covered.reduce((sum, number) => sum + probabilities[number], 0)
+    const coreMass = core.reduce((sum, number) => sum + probabilities[number], 0)
+    const outerMass = outerRing.reduce((sum, number) => sum + probabilities[number], 0)
+    const fieldMass = covered.reduce((sum, number) => sum + regionalField.probabilities[number], 0)
+    const memory = measureFixedSectorMemory(history, center, fixedSpan)
+    const roiEstimate = estimateRoi(mass, covered.length)
+    const baseline = covered.length / NUMBER_COUNT
+    const coreBaseline = core.length / NUMBER_COUNT
+    const baselineGap = mass - baseline
+    const breakEvenGap = mass - covered.length / 36
+    const insideAverage = mass / covered.length
+    const outsideAverage = outerRing.length ? outerMass / outerRing.length : UNIFORM_PROBABILITY
+    const contrast = insideAverage - outsideAverage
+    const lift = mass / baseline - 1
+    const coreLift = coreMass / coreBaseline - 1
+    const fieldAgreement = fieldMass / Math.max(baseline, 0.0001)
+    const rimGap = coreMass / core.length - (mass - coreMass) / Math.max(covered.length - core.length, 1)
+    const pressure =
+      Math.max(lift, 0) * 0.14 +
+      Math.max(coreLift, 0) * 0.17 +
+      Math.max(memory.lift, 0) * 0.18 +
+      Math.max(memory.shortLift, 0) * 0.1 +
+      Math.max(contrast, 0) * NUMBER_COUNT * 0.22 +
+      Math.max(rimGap, 0) * NUMBER_COUNT * 0.08 +
+      fieldAgreement * 0.08 +
+      regionalField.concentration * 0.08
+    const score =
+      (roiEstimate * 0.42 + baselineGap * 0.9 + breakEvenGap * 1.55 + pressure) * evidenceFactor
 
-      if (!best || score > best.score) {
-        best = {
-          center,
-          span,
-          covered,
-          mass,
-          roiEstimate,
-          contrast,
-          lift,
-          fieldAgreement: clamp(fieldAgreement, 0, 1.8),
-          projectedNumber: regionalField.projectedNumber,
-          score,
-        }
+    if (!best || score > best.score) {
+      best = {
+        center,
+        span: fixedSpan,
+        covered,
+        mass,
+        roiEstimate,
+        contrast,
+        lift,
+        coreLift,
+        memoryLift: memory.lift,
+        memoryRate: memory.posteriorRate,
+        fieldAgreement: clamp(fieldAgreement, 0, 1.8),
+        projectedNumber: regionalField.projectedNumber,
+        rimGap,
+        score,
       }
-    })
-  }
+    }
+  })
 
   return (
     best ?? {
       center: 0,
-      span: 2,
-      covered: getCoveredNumbers(0, 2),
-      mass: getCoveredNumbers(0, 2).reduce((sum, number) => sum + probabilities[number], 0),
+      span: fixedSpan,
+      covered: getCoveredNumbers(0, fixedSpan),
+      mass: getCoveredNumbers(0, fixedSpan).reduce((sum, number) => sum + probabilities[number], 0),
       roiEstimate: 0,
       contrast: 0,
       lift: 0,
+      coreLift: 0,
+      memoryLift: 0,
+      memoryRate: 0,
       fieldAgreement: 0,
       projectedNumber: regionalField.projectedNumber,
+      rimGap: 0,
       score: 0,
     }
   )
+}
+
+function measureFixedSectorMemory(history, center, span) {
+  const covered = new Set(getCoveredNumbers(center, span))
+  const baseline = covered.size / NUMBER_COUNT
+  const priorWeight = 18
+  let weightedHits = 0
+  let totalWeight = 0
+  let shortHits = 0
+  let shortTotal = 0
+
+  history.forEach((number, index) => {
+    const age = history.length - index - 1
+    const weight = Math.exp(-age / 30)
+    const isHit = covered.has(number) ? 1 : 0
+    weightedHits += isHit * weight
+    totalWeight += weight
+
+    if (age < 14) {
+      const shortWeight = Math.exp(-age / 7)
+      shortHits += isHit * shortWeight
+      shortTotal += shortWeight
+    }
+  })
+
+  const posteriorRate = (baseline * priorWeight + weightedHits) / (priorWeight + totalWeight)
+  const shortRate = shortTotal ? shortHits / shortTotal : baseline
+
+  return {
+    posteriorRate,
+    lift: posteriorRate / baseline - 1,
+    shortLift: shortRate / baseline - 1,
+  }
 }
 
 function calculateConsensus(agentRows, weights, covered) {
