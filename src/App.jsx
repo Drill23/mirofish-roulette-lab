@@ -89,6 +89,12 @@ const AGENTS = [
     predict: predictTableQuadrants,
   },
   {
+    id: 'hybrid',
+    name: 'Estado hibrido',
+    signal: 'mesa e volante sincronizados',
+    predict: predictHybridState,
+  },
+  {
     id: 'mirror',
     name: 'Mirror scout',
     signal: 'padroes que repetem no espelho',
@@ -105,6 +111,18 @@ const AGENTS = [
     name: 'Anti-miss',
     signal: 'setor que teria capturado perdas recentes',
     predict: predictAntiMiss,
+  },
+  {
+    id: 'cycle',
+    name: 'Ciclo curto',
+    signal: 'repeticao de saltos recentes',
+    predict: predictShortCycle,
+  },
+  {
+    id: 'hunter',
+    name: 'Cacador',
+    signal: 'captura +9 em janelas vivas',
+    predict: predictHunter,
   },
   {
     id: 'seed',
@@ -417,6 +435,39 @@ function App() {
                   Base {population.recommendation.tableQuadrant.numbers.join(', ')}. Força{' '}
                   {formatPercent(population.recommendation.tableQuadrant.weight)}. Melhores centros{' '}
                   {population.recommendation.tableQuadrant.candidates.join(', ')}.
+                </p>
+              </div>
+
+              <div className="smart-card smart-card--hybrid">
+                <div>
+                  <span>Estado hibrido</span>
+                  <strong>
+                    Mesa R{population.recommendation.hybridState.region} + volante{' '}
+                    {population.recommendation.hybridState.projectedNumber}
+                  </strong>
+                </div>
+                <p>
+                  Alinhamento {formatPercent(population.recommendation.hybridState.alignment)}. Ciclo{' '}
+                  {population.recommendation.cycleSignal.period
+                    ? `${population.recommendation.cycleSignal.period}x -> ${population.recommendation.cycleSignal.projectedNumber}`
+                    : 'fraco'}
+                  . Thompson favorece {population.recommendation.adaptiveLeader} com{' '}
+                  {formatPercent(population.recommendation.adaptiveLeaderHitRate)} no paper adaptativo.
+                </p>
+              </div>
+
+              <div className="smart-card smart-card--hunter">
+                <div>
+                  <span>Cacador de acerto</span>
+                  <strong>
+                    Centro {population.recommendation.hunterProfile.center} / pressao{' '}
+                    {formatPercent(population.recommendation.hunterProfile.pressure)}
+                  </strong>
+                </div>
+                <p>
+                  Janelas {population.recommendation.hunterProfile.windowLabel}. Captura recente{' '}
+                  {formatPercent(population.recommendation.hunterProfile.windowHitRate)}. Ciclo cobre{' '}
+                  {formatPercent(population.recommendation.hunterProfile.cycleCover)}. Final sempre +{FIXED_SPAN}.
                 </p>
               </div>
 
@@ -971,10 +1022,14 @@ function buildSeedDistribution(seed) {
 
 function buildPopulation(history, span = FIXED_SPAN, seedDistribution = null, options = {}) {
   const withJudge = options.withJudge ?? true
+  const fastMode = options.fast ?? false
+  const useAdaptive = options.withAdaptive ?? !fastMode
+  const trainingLimit = fastMode ? 28 : 72
+  const trainingStart = Math.max(1, history.length - trainingLimit)
   const scores = Object.fromEntries(AGENTS.map((agent) => [agent.id, 0]))
   const context = { seedDistribution }
 
-  for (let index = 1; index < history.length; index += 1) {
+  for (let index = trainingStart; index < history.length; index += 1) {
     const prefix = history.slice(0, index)
     const actual = history[index]
 
@@ -985,13 +1040,19 @@ function buildPopulation(history, span = FIXED_SPAN, seedDistribution = null, op
     })
   }
 
+  const adaptiveStats = useAdaptive
+    ? buildAdaptiveStrategyStats(history, span, context)
+    : buildNeutralAdaptiveStats()
   const agentRows = AGENTS.map((agent) => {
     const probabilities = agent.predict(history, context)
     const center = findBestCenter(probabilities, span)
     const covered = getCoveredNumbers(center, span)
     const mass = covered.reduce((sum, number) => sum + probabilities[number], 0)
+    const adaptive = adaptiveStats[agent.id]
+
     return {
       ...agent,
+      adaptive,
       probabilities,
       center,
       covered,
@@ -1001,7 +1062,15 @@ function buildPopulation(history, span = FIXED_SPAN, seedDistribution = null, op
     }
   })
 
-  const weights = softmax(agentRows.map((agent) => agent.score), 0.7)
+  const baseWeights = softmax(agentRows.map((agent) => agent.score), 0.7)
+  const adaptiveWeights = useAdaptive
+    ? softmax(agentRows.map((agent) => agent.adaptive?.index ?? 0), 3.4)
+    : baseWeights
+  const weights = useAdaptive
+    ? normalizeToLength(
+        baseWeights.map((weight, index) => weight * 0.46 + adaptiveWeights[index] * 0.54),
+      )
+    : baseWeights
   const combined = normalize(
     agentRows.reduce(
       (total, agent, index) =>
@@ -1011,8 +1080,17 @@ function buildPopulation(history, span = FIXED_SPAN, seedDistribution = null, op
   )
   const stabilized = normalize(combined.map((value) => value * 0.94 + UNIFORM_PROBABILITY * 0.06))
   const activeSpan = span
-  const landingCoverage = findLandingCoverage(stabilized, history, activeSpan)
+  const baseLandingCoverage = findLandingCoverage(stabilized, history, activeSpan)
   const tableQuadrant = analyzeTableQuadrant(history, stabilized, activeSpan)
+  const hybridState = analyzeHybridState(history, stabilized, activeSpan)
+  const cycleSignal = detectShortCycle(history)
+  const hunterProfile = findHunterCoverage(stabilized, history, activeSpan, {
+    baseCoverage: baseLandingCoverage,
+    cycleSignal,
+    hybridState,
+    tableQuadrant,
+  })
+  const landingCoverage = selectHunterCoverage(baseLandingCoverage, hunterProfile)
   const center = landingCoverage.center
   const covered = landingCoverage.covered
   const mass = covered.reduce((sum, number) => sum + stabilized[number], 0)
@@ -1038,6 +1116,9 @@ function buildPopulation(history, span = FIXED_SPAN, seedDistribution = null, op
   )
   const smartCoverage = findSmartCoverage(stabilized)
   const leader = agentRows[weights.indexOf(Math.max(...weights))]
+  const adaptiveLeader =
+    agentRows.reduce((best, agent) => ((agent.adaptive?.index ?? -Infinity) > (best.adaptive?.index ?? -Infinity) ? agent : best), agentRows[0]) ??
+    leader
   const playScore =
     roiEstimate * 0.5 +
     confidence * 0.3 +
@@ -1076,7 +1157,7 @@ function buildPopulation(history, span = FIXED_SPAN, seedDistribution = null, op
   const message =
     history.length < 10
       ? `Ataque continuo liberado. Ainda com poucos giros, lider: ${leader.name}.`
-      : `Ataque continuo. Lider: ${leader.name}. ${judge.reason}`
+      : `Ataque continuo. Lider: ${leader.name}; adaptativo puxa ${adaptiveLeader.name}. ${judge.reason}`
 
   return {
     probabilities: stabilized,
@@ -1105,6 +1186,11 @@ function buildPopulation(history, span = FIXED_SPAN, seedDistribution = null, op
       landingMemoryLift: landingCoverage.memoryLift,
       landingRimGap: landingCoverage.rimGap,
       tableQuadrant,
+      hybridState,
+      cycleSignal,
+      hunterProfile,
+      adaptiveLeader: adaptiveLeader.name,
+      adaptiveLeaderHitRate: adaptiveLeader.adaptive?.hitRate ?? 0,
       activeSpan,
       fixedSpan: true,
       judge,
@@ -1251,14 +1337,49 @@ function buildShadowJudge({
   }
 }
 
+function buildFastRecommendation(history, span, seedDistribution) {
+  const sources = [
+    { probability: predictLandingZone(history), weight: 0.32 },
+    { probability: predictAntiMiss(history), weight: 0.22 },
+    { probability: predictTableQuadrants(history), weight: 0.18 },
+    { probability: predictShortCycle(history), weight: 0.18 },
+    { probability: seedDistribution ?? predictSkeptic(), weight: seedDistribution ? 0.1 : 0.02 },
+  ]
+  const probabilities = normalize(
+    sources.reduce(
+      (total, source) =>
+        total.map((value, number) => value + source.probability[number] * source.weight),
+      Array(NUMBER_COUNT).fill(0),
+    ),
+  )
+  const baseCoverage = findLandingCoverage(probabilities, history, span)
+  const tableQuadrant = analyzeTableQuadrant(history, probabilities, span)
+  const hybridState = analyzeHybridState(history, probabilities, span)
+  const cycleSignal = detectShortCycle(history)
+  const hunterProfile = findHunterCoverage(probabilities, history, span, {
+    baseCoverage,
+    cycleSignal,
+    hybridState,
+    tableQuadrant,
+  })
+  const selected = selectHunterCoverage(baseCoverage, hunterProfile)
+  const mass = selected.covered.reduce((sum, number) => sum + probabilities[number], 0)
+
+  return {
+    ...selected,
+    mass,
+    preliminaryAllow: mass >= selected.covered.length / NUMBER_COUNT,
+  }
+}
+
 function collectWalkForwardRecords(history, span, seedDistribution) {
-  const start = Math.max(10, history.length - WALK_FORWARD_WINDOW)
+  const start = Math.max(10, history.length - Math.min(WALK_FORWARD_WINDOW, 18))
   const records = []
 
   for (let index = start; index < history.length; index += 1) {
     const prefix = history.slice(0, index)
     const actual = history[index]
-    const recommendation = buildPopulation(prefix, span, seedDistribution, { withJudge: false }).recommendation
+    const recommendation = buildFastRecommendation(prefix, span, seedDistribution)
     records.push({
       hit: recommendation.covered.includes(actual),
       mass: recommendation.mass,
@@ -1376,6 +1497,84 @@ function buildWheelProfile(numbers) {
   return normalize(scores)
 }
 
+function buildAdaptiveStrategyStats(history, span, context) {
+  const baseline = FIXED_COVERAGE / NUMBER_COUNT
+  const start = Math.max(8, history.length - Math.min(32, Math.max(history.length - 1, 0)))
+  const stats = Object.fromEntries(
+    AGENTS.map((agent) => [
+      agent.id,
+      {
+        hitRate: baseline,
+        index: 0,
+        roi: 0,
+        samples: 0,
+      },
+    ]),
+  )
+
+  if (history.length < 10) {
+    return stats
+  }
+
+  AGENTS.forEach((agent) => {
+    let hits = 0
+    let net = 0
+    let predictedMass = 0
+    let samples = 0
+    let wagered = 0
+
+    for (let index = start; index < history.length; index += 1) {
+      const prefix = history.slice(0, index)
+      const actual = history[index]
+      const probabilities = agent.predict(prefix, context)
+      const coverage = findLandingCoverage(probabilities, prefix, span)
+      const hit = coverage.covered.includes(actual)
+
+      hits += hit ? 1 : 0
+      net += settleRoulette(coverage.covered, actual, 1)
+      predictedMass += coverage.mass
+      samples += 1
+      wagered += coverage.covered.length
+    }
+
+    const alpha = 2.4 + hits
+    const beta = 2.4 + samples - hits
+    const mean = alpha / (alpha + beta)
+    const variance = (alpha * beta) / ((alpha + beta) ** 2 * (alpha + beta + 1))
+    const noise = deterministicNoise(`${agent.id}:${history.length}:${history.at(-1) ?? 0}:${hits}`)
+    const thompsonSample = clamp(mean + (noise - 0.5) * Math.sqrt(variance) * 2.2, 0, 1)
+    const roi = wagered ? net / wagered : 0
+    const calibration = samples ? predictedMass / samples : baseline
+
+    stats[agent.id] = {
+      hitRate: samples ? hits / samples : baseline,
+      index:
+        (thompsonSample - baseline) * 5.8 +
+        clamp(roi, -0.65, 0.65) * 0.55 +
+        (calibration - baseline) * 1.7,
+      roi,
+      samples,
+    }
+  })
+
+  return stats
+}
+
+function buildNeutralAdaptiveStats() {
+  const baseline = FIXED_COVERAGE / NUMBER_COUNT
+  return Object.fromEntries(
+    AGENTS.map((agent) => [
+      agent.id,
+      {
+        hitRate: baseline,
+        index: 0,
+        roi: 0,
+        samples: 0,
+      },
+    ]),
+  )
+}
+
 function runBacktest(history, span, unit, seedDistribution = null) {
   if (history.length < 12) {
     return {
@@ -1400,10 +1599,12 @@ function runBacktest(history, span, unit, seedDistribution = null) {
   let coverageTotal = 0
   let randomControl = 0
 
-  for (let index = 10; index < history.length; index += 1) {
+  const start = Math.max(10, history.length - 72)
+
+  for (let index = start; index < history.length; index += 1) {
     const prefix = history.slice(0, index)
     const actual = history[index]
-    const recommendation = buildPopulation(prefix, span, seedDistribution, { withJudge: false }).recommendation
+    const recommendation = buildFastRecommendation(prefix, span, seedDistribution)
     const shouldBet = true
     const covered = recommendation.covered
     const randomCenter = WHEEL_ORDER[index % WHEEL_ORDER.length]
@@ -1662,6 +1863,90 @@ function predictTableQuadrants(history) {
 
   const zeroRecent = recent.filter((number) => number === 0).length
   scores[0] += zeroRecent ? zeroRecent / Math.max(recent.length, 1) : 0.08
+
+  return normalize(scores)
+}
+
+function predictHybridState(history) {
+  const scores = Array(NUMBER_COUNT).fill(0.16)
+  if (history.length < 4) {
+    return predictLandingZone(history)
+  }
+
+  const regionalField = buildRegionalField(history)
+  const tableSignal = buildTableQuadrantSignal(history)
+  const cycleSignal = detectShortCycle(history)
+
+  WHEEL_ORDER.forEach((number) => {
+    const quadrant = getTableQuadrant(number)
+    const tableWeight = quadrant >= 0 ? tableSignal.weights[quadrant] : 0.06
+    scores[number] += regionalField.probabilities[number] * (4.4 + regionalField.concentration * 2.2)
+    scores[number] += tableWeight * 2.35
+  })
+
+  const strongestRegion = tableSignal.weights.indexOf(Math.max(...tableSignal.weights))
+  TABLE_QUADRANTS[strongestRegion].forEach((number) => {
+    scores[number] += tableSignal.weights[strongestRegion] * 1.15
+    addWheelKernel(scores, WHEEL_ORDER.indexOf(number), tableSignal.weights[strongestRegion] * 0.2, 2.6)
+  })
+
+  addWheelKernel(
+    scores,
+    WHEEL_ORDER.indexOf(regionalField.projectedNumber),
+    1.7 + regionalField.concentration * 2.8,
+    3.2,
+  )
+
+  if (cycleSignal.strength > 0.18) {
+    addWheelKernel(scores, cycleSignal.projectedPosition, cycleSignal.strength * 4.2, 2.2)
+  }
+
+  return normalize(scores)
+}
+
+function predictShortCycle(history) {
+  const scores = Array(NUMBER_COUNT).fill(0.18)
+  if (history.length < 8) {
+    return predictRhythm(history)
+  }
+
+  const cycleSignal = detectShortCycle(history)
+  const rhythm = predictRhythm(history)
+
+  rhythm.forEach((probability, number) => {
+    scores[number] += probability * 2.1
+  })
+
+  if (cycleSignal.strength > 0.12) {
+    addWheelKernel(scores, cycleSignal.projectedPosition, 2.4 + cycleSignal.strength * 5.8, 2.1)
+    cycleSignal.echoes.forEach((position, index) => {
+      addWheelKernel(scores, position, cycleSignal.strength * (0.8 - index * 0.1), 2.8)
+    })
+  }
+
+  return normalize(scores)
+}
+
+function predictHunter(history) {
+  const scores = Array(NUMBER_COUNT).fill(0.14)
+  if (history.length < 6) {
+    return predictLandingZone(history)
+  }
+
+  const landingProbabilities = predictLandingZone(history)
+  const antiMissProbabilities = predictAntiMiss(history)
+  const blended = normalize(
+    landingProbabilities.map((probability, number) => probability * 0.64 + antiMissProbabilities[number] * 0.36),
+  )
+  const hunter = findHunterCoverage(blended, history, FIXED_SPAN)
+
+  blended.forEach((probability, number) => {
+    scores[number] += probability * 2.2
+  })
+  hunter.covered.forEach((number) => {
+    scores[number] += 1.35 / hunter.covered.length
+  })
+  addWheelKernel(scores, WHEEL_ORDER.indexOf(hunter.center), 2.2 + hunter.pressure * 2.6, 3.4)
 
   return normalize(scores)
 }
@@ -1942,6 +2227,232 @@ function analyzeTableQuadrant(history, probabilities, span) {
   }
 }
 
+function analyzeHybridState(history, probabilities, span) {
+  const regionalField = buildRegionalField(history)
+  const tableSignal = buildTableQuadrantSignal(history)
+  const regionIndex = tableSignal.weights.indexOf(Math.max(...tableSignal.weights))
+  const regionNumbers = TABLE_QUADRANTS[regionIndex]
+  const projectedCoverage = getCoveredNumbers(regionalField.projectedNumber, span)
+  const regionMass = regionNumbers.reduce((sum, number) => sum + probabilities[number], 0)
+  const alignment =
+    projectedCoverage.filter((number) => getTableQuadrant(number) === regionIndex).length /
+    Math.max(projectedCoverage.length, 1)
+  const candidates = regionNumbers
+    .map((number) => {
+      const covered = getCoveredNumbers(number, span)
+      const mass = covered.reduce((sum, coveredNumber) => sum + probabilities[coveredNumber], 0)
+      const wheelOverlap = covered.includes(regionalField.projectedNumber) ? regionalField.concentration : 0
+      return {
+        number,
+        score: mass + probabilities[number] * 2 + wheelOverlap * 0.14,
+      }
+    })
+    .sort((left, right) => right.score - left.score)
+
+  return {
+    alignment: clamp(alignment * 0.52 + regionalField.concentration * 0.32 + tableSignal.weights[regionIndex] * 0.16, 0, 1),
+    center: candidates[0]?.number ?? regionNumbers[0],
+    projectedNumber: regionalField.projectedNumber,
+    region: regionIndex + 1,
+    regionMass,
+    tableWeight: tableSignal.weights[regionIndex],
+    wheelConcentration: regionalField.concentration,
+  }
+}
+
+function detectShortCycle(history) {
+  const fallbackPosition = WHEEL_ORDER.indexOf(history.at(-1) ?? 0)
+  const fallback = {
+    echoes: [],
+    period: 0,
+    projectedNumber: WHEEL_ORDER[fallbackPosition] ?? 0,
+    projectedPosition: fallbackPosition >= 0 ? fallbackPosition : 0,
+    strength: 0,
+  }
+
+  if (history.length < 8) {
+    return fallback
+  }
+
+  const positions = history.map((number) => WHEEL_ORDER.indexOf(number))
+  const jumps = []
+  for (let index = 1; index < positions.length; index += 1) {
+    jumps.push(mod(positions[index] - positions[index - 1], WHEEL_ORDER.length))
+  }
+
+  let best = fallback
+
+  for (let period = 2; period <= 9; period += 1) {
+    if (jumps.length < period * 2) {
+      continue
+    }
+
+    const pattern = jumps.slice(-period)
+    const projectedJumps = []
+    const projectedWeights = []
+    let weightedScore = 0
+    let totalWeight = 0
+
+    for (let start = jumps.length - period * 2, copy = 0; start >= 0 && copy < 7; start -= period, copy += 1) {
+      const previousPattern = jumps.slice(start, start + period)
+      if (previousPattern.length < period) {
+        continue
+      }
+
+      const similarity =
+        previousPattern.reduce((sum, jump, index) => {
+          const distance = circularDistance(jump, pattern[index], WHEEL_ORDER.length)
+          return sum + Math.exp(-distance / 4.8)
+        }, 0) / period
+      const nextJump = jumps[start + period] ?? pattern[0]
+      const nextSimilarity = Math.exp(-circularDistance(nextJump, pattern[0], WHEEL_ORDER.length) / 5.2)
+      const weight = Math.exp(-copy / 2.8)
+
+      weightedScore += similarity * nextSimilarity * weight
+      totalWeight += weight
+      projectedJumps.push(nextJump)
+      projectedWeights.push(similarity * weight)
+    }
+
+    if (!totalWeight || !projectedJumps.length) {
+      continue
+    }
+
+    const evidence = clamp((jumps.length - period) / (period * 7), 0.34, 1)
+    const strength = clamp((weightedScore / totalWeight) * evidence, 0, 1)
+    const jumpMean = circularMean(projectedJumps, projectedWeights, WHEEL_ORDER.length)
+    const projectedPosition = mod(Math.round(positions.at(-1) + jumpMean.coordinate), WHEEL_ORDER.length)
+
+    if (strength > best.strength) {
+      best = {
+        echoes: projectedJumps
+          .slice(0, 5)
+          .map((jump) => mod(positions.at(-1) + jump, WHEEL_ORDER.length)),
+        period,
+        projectedNumber: WHEEL_ORDER[projectedPosition],
+        projectedPosition,
+        strength,
+      }
+    }
+  }
+
+  return best
+}
+
+function findHunterCoverage(probabilities, history, span, context = {}) {
+  const regionalField = buildRegionalField(history)
+  const tableSignal = buildTableQuadrantSignal(history)
+  const cycleSignal = context.cycleSignal ?? detectShortCycle(history)
+  const windows = [10, 18, 34, 55].filter((window) => window <= Math.max(history.length, 10))
+  let best = null
+
+  WHEEL_ORDER.forEach((center) => {
+    const profile = buildCoverageProfile(probabilities, history, center, span, regionalField, tableSignal)
+    const windowRows = windows.map((window, index) => {
+      const sample = history.slice(-Math.min(window, history.length))
+      const hits = sample.filter((number) => profile.covered.includes(number)).length
+      const rate = sample.length ? hits / sample.length : profile.baseline
+      return {
+        rate,
+        weight: 1 + index * 0.38,
+        window,
+      }
+    })
+    const weightTotal = windowRows.reduce((sum, row) => sum + row.weight, 0)
+    const windowHitRate = weightTotal
+      ? windowRows.reduce((sum, row) => sum + row.rate * row.weight, 0) / weightTotal
+      : profile.baseline
+    const windowLift = windowHitRate / profile.baseline - 1
+    const cycleCover = profile.covered.includes(cycleSignal.projectedNumber) ? cycleSignal.strength : 0
+    const hybridCover = context.hybridState?.projectedNumber
+      ? profile.covered.includes(context.hybridState.projectedNumber)
+        ? context.hybridState.alignment
+        : 0
+      : 0
+    const quadrantMatch =
+      context.tableQuadrant && getTableQuadrant(center) === context.tableQuadrant.region - 1
+        ? context.tableQuadrant.weight
+        : 0
+    const pressure = clamp(
+      (profile.mass - profile.baseline) * 1.8 +
+        windowHitRate * 0.72 +
+        profile.shortRate * 0.42 +
+        Math.max(windowLift, 0) * 0.16 +
+        Math.max(profile.memoryLift, 0) * 0.22 +
+        profile.tableCoverage * 0.18 +
+        cycleCover * 0.24 +
+        hybridCover * 0.16 +
+        quadrantMatch * 0.18,
+      0,
+      1,
+    )
+    const score =
+      profile.mass * 0.66 +
+      windowHitRate * 0.68 +
+      profile.shortRate * 0.34 +
+      Math.max(profile.memoryLift, 0) * 0.16 +
+      Math.max(profile.coreLift, 0) * 0.08 +
+      cycleCover * 0.2 +
+      hybridCover * 0.12 +
+      quadrantMatch * 0.14
+
+    if (!best || score > best.score) {
+      best = {
+        ...profile,
+        cycleCover,
+        pressure,
+        score,
+        windowHitRate,
+        windowLabel: windowRows.map((row) => `${row.window}:${Math.round(row.rate * 100)}%`).join(' | '),
+      }
+    }
+  })
+
+  return best ?? buildCoverageProfile(probabilities, history, 0, span, regionalField, tableSignal)
+}
+
+function selectHunterCoverage(baseCoverage, hunterProfile) {
+  if (!hunterProfile) {
+    return {
+      ...baseCoverage,
+      hunterActive: false,
+    }
+  }
+
+  const shouldUseHunter =
+    hunterProfile.pressure >= 0.34 ||
+    hunterProfile.score >=
+      baseCoverage.mass * 0.62 + (baseCoverage.shortRate ?? BREAK_EVEN_PROBABILITY) * 0.38
+
+  if (!shouldUseHunter) {
+    return {
+      ...baseCoverage,
+      hunterActive: false,
+    }
+  }
+
+  return {
+    ...baseCoverage,
+    center: hunterProfile.center,
+    contrast: hunterProfile.contrast,
+    coreLift: hunterProfile.coreLift,
+    covered: hunterProfile.covered,
+    fieldAgreement: Math.max(baseCoverage.fieldAgreement ?? 0, hunterProfile.fieldAgreement ?? 0),
+    hunterActive: true,
+    lift: hunterProfile.lift,
+    mass: hunterProfile.mass,
+    memoryLift: hunterProfile.memoryLift,
+    memoryRate: hunterProfile.memoryRate,
+    projectedNumber: hunterProfile.projectedNumber,
+    rimGap: hunterProfile.rimGap,
+    roiEstimate: hunterProfile.roiEstimate,
+    score: Math.max(baseCoverage.score ?? 0, hunterProfile.score),
+    shortRate: hunterProfile.shortRate,
+    tableCoverage: hunterProfile.tableCoverage,
+    tableLift: hunterProfile.tableLift,
+  }
+}
+
 function circularHarmonic(numbers, harmonic) {
   let real = 0
   let imaginary = 0
@@ -2039,6 +2550,51 @@ function findSmartCoverage(probabilities) {
   }
 
   return best
+}
+
+function buildCoverageProfile(probabilities, history, center, span, regionalField, tableSignal) {
+  const activeRegionalField = regionalField ?? buildRegionalField(history)
+  const activeTableSignal = tableSignal ?? buildTableQuadrantSignal(history)
+  const covered = getCoveredNumbers(center, span)
+  const coreSpan = Math.max(2, Math.floor(span / 2))
+  const core = getCoveredNumbers(center, coreSpan)
+  const outerRing = getOuterRingNumbers(center, span, Math.min(span + 4, 18))
+  const mass = covered.reduce((sum, number) => sum + probabilities[number], 0)
+  const coreMass = core.reduce((sum, number) => sum + probabilities[number], 0)
+  const outerMass = outerRing.reduce((sum, number) => sum + probabilities[number], 0)
+  const fieldMass = covered.reduce((sum, number) => sum + activeRegionalField.probabilities[number], 0)
+  const memory = measureFixedSectorMemory(history, center, span)
+  const baseline = covered.length / NUMBER_COUNT
+  const coreBaseline = core.length / NUMBER_COUNT
+  const insideAverage = mass / covered.length
+  const outsideAverage = outerRing.length ? outerMass / outerRing.length : UNIFORM_PROBABILITY
+  const centerQuadrant = getTableQuadrant(center)
+  const tableLift = centerQuadrant >= 0 ? activeTableSignal.weights[centerQuadrant] / 0.25 - 1 : 0
+  const tableCoverage =
+    covered.reduce((sum, number) => {
+      const quadrant = getTableQuadrant(number)
+      return sum + (quadrant >= 0 ? activeTableSignal.weights[quadrant] : 0.05)
+    }, 0) / covered.length
+
+  return {
+    baseline,
+    center,
+    contrast: insideAverage - outsideAverage,
+    coreLift: coreMass / coreBaseline - 1,
+    covered,
+    fieldAgreement: clamp(fieldMass / Math.max(baseline, 0.0001), 0, 1.8),
+    lift: mass / baseline - 1,
+    mass,
+    memoryLift: memory.lift,
+    memoryRate: memory.posteriorRate,
+    projectedNumber: activeRegionalField.projectedNumber,
+    rimGap: coreMass / core.length - (mass - coreMass) / Math.max(covered.length - core.length, 1),
+    roiEstimate: estimateRoi(mass, covered.length),
+    shortRate: memory.shortRate,
+    span,
+    tableCoverage,
+    tableLift,
+  }
 }
 
 function findLandingCoverage(probabilities, history, fixedSpan = FIXED_SPAN) {
@@ -2301,6 +2857,15 @@ function clamp(value, min, max) {
 
 function average(values, fallback = 0) {
   return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : fallback
+}
+
+function deterministicNoise(value) {
+  let hash = 0
+  for (let index = 0; index < value.length; index += 1) {
+    hash += value.charCodeAt(index) * (index + 17)
+  }
+  const raw = Math.sin(hash) * 10000
+  return raw - Math.floor(raw)
 }
 
 function stripAccents(value) {
