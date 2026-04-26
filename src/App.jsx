@@ -20,6 +20,8 @@ const NUMBER_COUNT = 37
 const UNIFORM_PROBABILITY = 1 / NUMBER_COUNT
 const FIXED_SPAN = 9
 const FIXED_COVERAGE = FIXED_SPAN * 2 + 1
+const BREAK_EVEN_PROBABILITY = FIXED_COVERAGE / 36
+const WALK_FORWARD_WINDOW = 34
 const STORAGE_KEY = 'mirofish-roulette-lab:v1'
 const SAMPLE_SEED_TEXT =
   'vermelho 47 preto 13 verde 1 pares 47 impares 13 1-18 46 19-36 14 duzias 30 34 32 colunas 31 34 31 ultimos 31 3 34 10 11 33 29 17 3 25 23'
@@ -295,7 +297,7 @@ function App() {
           <div className="metric-strip">
             <Metric label="Historico" value={history.length} />
             <Metric label="Paper 10" value={`${Math.min(savedState.paperLog.length, 10)}/10`} />
-            <Metric label="ROI est." value={formatSignedPercent(population.recommendation.roiEstimate)} />
+            <Metric label="Juiz" value={formatPercent(population.recommendation.judge.score)} />
             <Metric label="Backtest" value={formatMoney(backtest.net)} />
           </div>
         </section>
@@ -365,6 +367,23 @@ function App() {
                   {formatSignedPercent(population.recommendation.landingCoreLift)}. Memoria{' '}
                   {formatSignedPercent(population.recommendation.landingMemoryLift)}. Confiança{' '}
                   {formatPercent(population.recommendation.confidence)}. +{FIXED_SPAN} fixo.
+                </p>
+              </div>
+
+              <div className="smart-card smart-card--judge">
+                <div>
+                  <span>Juiz MiroFish</span>
+                  <strong>
+                    {population.recommendation.judge.label} / Campeao{' '}
+                    {population.recommendation.judge.championName}
+                  </strong>
+                </div>
+                <p>
+                  Walk-forward {formatPercent(population.recommendation.judge.hitRate)}. Calibrado{' '}
+                  {formatPercent(population.recommendation.judge.calibratedProbability)}. Breakeven{' '}
+                  {formatPercent(population.recommendation.judge.breakEven)}. Mesa{' '}
+                  {formatPercent(population.recommendation.judge.stability)}.{' '}
+                  {population.recommendation.judge.reason}
                 </p>
               </div>
 
@@ -587,6 +606,20 @@ function App() {
               Use as primeiras 10 rodadas como ensaio de fluxo. So conte como entrada quando o
               painel disser jogar; o restante fica registrado como nao jogo.
             </p>
+            <div className="audit-list">
+              <div>
+                <span>Entradas reais</span>
+                <strong>{paperSummary.bets}</strong>
+              </div>
+              <div>
+                <span>Evitou perdas</span>
+                <strong>{paperSummary.avoidedLosses}</strong>
+              </div>
+              <div>
+                <span>Perdeu chances</span>
+                <strong>{paperSummary.missedChances}</strong>
+              </div>
+            </div>
             <div className="paper-log">
               {savedState.paperLog.length ? (
                 savedState.paperLog.slice(0, 10).map((entry) => (
@@ -903,7 +936,8 @@ function buildSeedDistribution(seed) {
   return smoothOnWheel(scores, 0.35)
 }
 
-function buildPopulation(history, span = FIXED_SPAN, seedDistribution = null) {
+function buildPopulation(history, span = FIXED_SPAN, seedDistribution = null, options = {}) {
+  const withJudge = options.withJudge ?? true
   const scores = Object.fromEntries(AGENTS.map((agent) => [agent.id, 0]))
   const context = { seedDistribution }
 
@@ -976,10 +1010,30 @@ function buildPopulation(history, span = FIXED_SPAN, seedDistribution = null) {
     Math.max(landingCoverage.lift, 0) * 0.14 +
     landingCoverage.fieldAgreement * 0.08 +
     Math.max(landingCoverage.memoryLift, 0) * 0.09
-  const mode =
+  const preliminaryAllow =
     history.length >= 10 && roiEstimate >= 0.018 && confidence >= 0.36 && playScore >= 0.16
-      ? 'bet'
-      : 'hold'
+  const judge = withJudge
+    ? buildJudge({
+        confidence,
+        covered,
+        history,
+        landingCoverage,
+        mass,
+        playScore,
+        preliminaryAllow,
+        roiEstimate,
+        seedDistribution,
+        span: activeSpan,
+      })
+    : buildShadowJudge({
+        confidence,
+        history,
+        mass,
+        playScore,
+        preliminaryAllow,
+        roiEstimate,
+      })
+  const mode = judge.allow ? 'bet' : 'hold'
   const decision =
     mode === 'bet'
       ? {
@@ -993,10 +1047,10 @@ function buildPopulation(history, span = FIXED_SPAN, seedDistribution = null) {
 
   const message =
     mode === 'bet'
-      ? `Populacao inclinada para ${leader.name}. Setor +${activeSpan} passou o corte fixo.`
+      ? `Populacao inclinada para ${leader.name}. ${judge.reason}`
       : history.length < 10
         ? 'Carregue pelo menos 10 giros para liberar decisao de jogo.'
-        : `Setor +${activeSpan} abaixo do corte matematico. Nao jogar agora.`
+        : judge.reason
 
   return {
     probabilities: stabilized,
@@ -1026,9 +1080,11 @@ function buildPopulation(history, span = FIXED_SPAN, seedDistribution = null) {
       landingRimGap: landingCoverage.rimGap,
       activeSpan,
       fixedSpan: true,
+      judge,
       mass,
       mode,
       message,
+      preliminaryAllow,
       playScore,
     },
     agents: agentRows
@@ -1036,6 +1092,270 @@ function buildPopulation(history, span = FIXED_SPAN, seedDistribution = null) {
       .sort((left, right) => right.weight - left.weight)
       .map((agent, index) => ({ ...agent, rank: index + 1 })),
   }
+}
+
+function buildJudge({
+  confidence,
+  covered,
+  history,
+  landingCoverage,
+  mass,
+  playScore,
+  preliminaryAllow,
+  roiEstimate,
+  seedDistribution,
+  span,
+}) {
+  if (history.length < 12) {
+    return buildShadowJudge({
+      confidence,
+      history,
+      mass,
+      playScore,
+      preliminaryAllow: false,
+      reason: 'Juiz aguardando pelo menos 12 giros para medir o comportamento da mesa.',
+      roiEstimate,
+    })
+  }
+
+  const records = collectWalkForwardRecords(history, span, seedDistribution)
+  const sampleSize = records.length
+  const hits = records.filter((record) => record.hit).length
+  const hitRate = sampleSize ? hits / sampleSize : 0
+  const predictedMean = average(records.map((record) => record.mass), BREAK_EVEN_PROBABILITY)
+  const empiricalRate =
+    sampleSize > 0
+      ? (hits + BREAK_EVEN_PROBABILITY * 10) / (sampleSize + 10)
+      : BREAK_EVEN_PROBABILITY
+  const calibrationError = Math.abs(predictedMean - empiricalRate)
+  const calibratedProbability = clamp(
+    mass * 0.5 +
+      empiricalRate * 0.28 +
+      (landingCoverage.memoryRate ?? BREAK_EVEN_PROBABILITY) * 0.18 +
+      landingCoverage.fieldAgreement * 0.025 -
+      calibrationError * 0.34,
+    0,
+    1,
+  )
+  const modelNet = records.reduce((sum, record) => sum + record.net, 0)
+  const modelWager = records.reduce((sum, record) => sum + record.wager, 0)
+  const modelRoi = modelWager ? modelNet / modelWager : 0
+  const stability = calculateRegimeStability(history)
+  const champion = rankChampion(history, span, seedDistribution)
+  const championGap = modelRoi - champion.roi
+  const margin = calibratedProbability - BREAK_EVEN_PROBABILITY
+  const judgeScore = clamp(
+    margin * 7.2 +
+      hitRate * 0.24 +
+      Math.max(modelRoi, -0.4) * 0.16 +
+      stability * 0.18 +
+      (championGap >= -0.12 ? 0.12 : -0.1) +
+      (preliminaryAllow ? 0.14 : -0.06),
+    0,
+    1,
+  )
+  const allow =
+    preliminaryAllow &&
+    sampleSize >= 8 &&
+    calibratedProbability >= BREAK_EVEN_PROBABILITY + 0.006 &&
+    stability >= 0.34 &&
+    championGap >= -0.18 &&
+    judgeScore >= 0.52
+  const reason = explainJudge({
+    allow,
+    calibratedProbability,
+    champion,
+    championGap,
+    judgeScore,
+    preliminaryAllow,
+    stability,
+  })
+
+  return {
+    allow,
+    breakEven: BREAK_EVEN_PROBABILITY,
+    calibratedProbability,
+    championName: champion.name,
+    championRoi: champion.roi,
+    confidence,
+    hitRate,
+    label: allow ? 'APROVADO' : 'BLOQUEADO',
+    modelRoi,
+    predictedMean,
+    reason,
+    sampleSize,
+    score: judgeScore,
+    stability,
+    wageredNumbers: covered.length,
+  }
+}
+
+function buildShadowJudge({
+  confidence,
+  history,
+  mass,
+  playScore,
+  preliminaryAllow,
+  reason = '',
+  roiEstimate,
+}) {
+  const score = clamp(
+    (mass - BREAK_EVEN_PROBABILITY) * 6 + confidence * 0.26 + playScore * 0.3 + (preliminaryAllow ? 0.16 : 0),
+    0,
+    1,
+  )
+
+  return {
+    allow: preliminaryAllow,
+    breakEven: BREAK_EVEN_PROBABILITY,
+    calibratedProbability: mass,
+    championName: 'MiroFish',
+    championRoi: roiEstimate,
+    confidence,
+    hitRate: history.length ? mass : 0,
+    label: preliminaryAllow ? 'PRE-APROVADO' : 'BLOQUEADO',
+    modelRoi: roiEstimate,
+    predictedMean: mass,
+    reason: reason || (preliminaryAllow ? 'Pre-filtro matematico positivo.' : 'Pre-filtro matematico abaixo do corte.'),
+    sampleSize: 0,
+    score,
+    stability: history.length >= 12 ? calculateRegimeStability(history) : 0,
+    wageredNumbers: FIXED_COVERAGE,
+  }
+}
+
+function collectWalkForwardRecords(history, span, seedDistribution) {
+  const start = Math.max(10, history.length - WALK_FORWARD_WINDOW)
+  const records = []
+
+  for (let index = start; index < history.length; index += 1) {
+    const prefix = history.slice(0, index)
+    const actual = history[index]
+    const recommendation = buildPopulation(prefix, span, seedDistribution, { withJudge: false }).recommendation
+    records.push({
+      hit: recommendation.covered.includes(actual),
+      mass: recommendation.mass,
+      net: settleRoulette(recommendation.covered, actual, 1),
+      preliminaryAllow: recommendation.preliminaryAllow,
+      wager: recommendation.covered.length,
+    })
+  }
+
+  return records
+}
+
+function rankChampion(history, span, seedDistribution) {
+  if (history.length < 12) {
+    return { hitRate: 0, name: 'MiroFish', roi: 0, score: 0 }
+  }
+
+  const context = { seedDistribution }
+  const start = Math.max(10, history.length - Math.min(WALK_FORWARD_WINDOW, 28))
+  const candidates = AGENTS.filter((agent) => agent.id !== 'skeptic').map((agent) => {
+    let hits = 0
+    let net = 0
+    let wagered = 0
+    let predicted = 0
+    let total = 0
+
+    for (let index = start; index < history.length; index += 1) {
+      const prefix = history.slice(0, index)
+      const actual = history[index]
+      const probabilities = agent.predict(prefix, context)
+      const coverage = findLandingCoverage(probabilities, prefix, span)
+      const hit = coverage.covered.includes(actual)
+      hits += hit ? 1 : 0
+      net += settleRoulette(coverage.covered, actual, 1)
+      wagered += coverage.covered.length
+      predicted += coverage.mass
+      total += 1
+    }
+
+    const hitRate = total ? hits / total : 0
+    const roi = wagered ? net / wagered : 0
+    const predictedMean = total ? predicted / total : BREAK_EVEN_PROBABILITY
+    const score = hitRate * 0.48 + clamp(roi, -1, 1) * 0.3 + predictedMean * 0.22
+
+    return {
+      hitRate,
+      name: agent.name,
+      roi,
+      score,
+    }
+  })
+
+  return candidates.sort((left, right) => right.score - left.score)[0] ?? {
+    hitRate: 0,
+    name: 'MiroFish',
+    roi: 0,
+    score: 0,
+  }
+}
+
+function explainJudge({
+  allow,
+  calibratedProbability,
+  champion,
+  championGap,
+  judgeScore,
+  preliminaryAllow,
+  stability,
+}) {
+  if (allow) {
+    return `Juiz aprovou: probabilidade calibrada acima do breakeven e mesa estavel.`
+  }
+  if (!preliminaryAllow) {
+    return 'Juiz bloqueou: os sinais brutos ainda nao passaram o pre-filtro.'
+  }
+  if (calibratedProbability < BREAK_EVEN_PROBABILITY + 0.006) {
+    return `Juiz bloqueou: calibrado ${formatPercent(calibratedProbability)} fica perto do breakeven.`
+  }
+  if (stability < 0.34) {
+    return 'Juiz bloqueou: mudanca recente na mesa reduziu confianca.'
+  }
+  if (championGap < -0.18) {
+    return `Juiz bloqueou: ${champion.name} esta performando melhor no walk-forward.`
+  }
+  if (judgeScore < 0.52) {
+    return 'Juiz bloqueou: placar combinado ainda nao compensa o risco do +9.'
+  }
+  return 'Juiz bloqueou: evidencia insuficiente para entrada.'
+}
+
+function calculateRegimeStability(history) {
+  if (history.length < 32) {
+    return 0.55
+  }
+
+  const recent = history.slice(-18)
+  const previous = history.slice(-54, -18)
+  const recentProfile = buildWheelProfile(recent)
+  const previousProfile = buildWheelProfile(previous)
+  const totalVariation =
+    recentProfile.reduce((sum, value, index) => sum + Math.abs(value - previousProfile[index]), 0) / 2
+
+  return clamp(1 - totalVariation * 1.35, 0, 1)
+}
+
+function buildWheelProfile(numbers) {
+  const scores = Array(NUMBER_COUNT).fill(0.02)
+
+  numbers.forEach((number, index) => {
+    const position = WHEEL_ORDER.indexOf(number)
+    const weight = 0.6 + (index + 1) / Math.max(numbers.length, 1)
+    addWheelKernel(scores, position, weight, 2.1)
+  })
+
+  return normalize(scores)
+}
+
+function quickBacktestGate(recommendation, history) {
+  return (
+    recommendation.preliminaryAllow &&
+    recommendation.mass >= BREAK_EVEN_PROBABILITY + 0.004 &&
+    recommendation.confidence >= 0.35 &&
+    calculateRegimeStability(history) >= 0.3
+  )
 }
 
 function runBacktest(history, span, unit, seedDistribution = null) {
@@ -1065,8 +1385,8 @@ function runBacktest(history, span, unit, seedDistribution = null) {
   for (let index = 10; index < history.length; index += 1) {
     const prefix = history.slice(0, index)
     const actual = history[index]
-    const recommendation = buildPopulation(prefix, span, seedDistribution).recommendation
-    const shouldBet = recommendation.mode === 'bet'
+    const recommendation = buildPopulation(prefix, span, seedDistribution, { withJudge: false }).recommendation
+    const shouldBet = quickBacktestGate(recommendation, prefix)
     const covered = recommendation.covered
     const randomCenter = WHEEL_ORDER[index % WHEEL_ORDER.length]
     const randomCovered = getCoveredNumbers(randomCenter, span)
@@ -1128,11 +1448,21 @@ function settleRoulette(covered, actual, unit) {
 
 function summarizePaper(log) {
   return log.reduce(
-    (summary, entry) => ({
-      wins: summary.wins + (entry.net > 0 ? 1 : 0),
-      net: summary.net + entry.net,
-    }),
-    { wins: 0, net: 0 },
+    (summary, entry) => {
+      const isBet = entry.action === 'bet'
+      const avoidedLoss = !isBet && (entry.wouldNet ?? 0) <= 0
+      const missedChance = !isBet && (entry.wouldNet ?? 0) > 0
+
+      return {
+        avoidedLosses: summary.avoidedLosses + (avoidedLoss ? 1 : 0),
+        bets: summary.bets + (isBet ? 1 : 0),
+        missedChances: summary.missedChances + (missedChance ? 1 : 0),
+        net: summary.net + entry.net,
+        skips: summary.skips + (!isBet ? 1 : 0),
+        wins: summary.wins + (entry.net > 0 ? 1 : 0),
+      }
+    },
+    { avoidedLosses: 0, bets: 0, missedChances: 0, net: 0, skips: 0, wins: 0 },
   )
 }
 
@@ -1762,6 +2092,10 @@ function mod(value, length) {
 
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max)
+}
+
+function average(values, fallback = 0) {
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : fallback
 }
 
 function stripAccents(value) {
